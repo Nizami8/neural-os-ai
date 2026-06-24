@@ -1,0 +1,10 @@
+build/
+*.o
+*.elf
+*.bin
+kernel
+target/
+*.swp
+*.swo
+*~
+.DS_Store
