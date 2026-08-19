@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 echo "🚀 Milk-V Duo 256M Setup Script for Neural OS"
 echo "============================================"
@@ -80,6 +81,34 @@ if ! command -v riscv64-unknown-elf-gcc &> /dev/null; then
     
     cd ~/milkv-workspace
     wget -O "$TOOLCHAIN_FILE" "$TOOLCHAIN_URL"
+
+    if command -v sha256sum &> /dev/null; then
+        OBSERVED_SHA256=$(sha256sum "$TOOLCHAIN_FILE" | awk '{print $1}')
+    elif command -v shasum &> /dev/null; then
+        OBSERVED_SHA256=$(shasum -a 256 "$TOOLCHAIN_FILE" | awk '{print $1}')
+    else
+        echo "❌ Cannot verify toolchain: sha256sum or shasum is required"
+        rm -f "$TOOLCHAIN_FILE"
+        exit 1
+    fi
+
+    echo "   Observed toolchain SHA-256: $OBSERVED_SHA256"
+    if [[ -n "${RISCV_TOOLCHAIN_SHA256:-}" ]]; then
+        if [[ ! "$RISCV_TOOLCHAIN_SHA256" =~ ^[[:xdigit:]]{64}$ ]]; then
+            echo "❌ RISCV_TOOLCHAIN_SHA256 must be a 64-digit hexadecimal SHA-256 digest"
+            rm -f "$TOOLCHAIN_FILE"
+            exit 1
+        fi
+        if [[ "${RISCV_TOOLCHAIN_SHA256,,}" != "$OBSERVED_SHA256" ]]; then
+            echo "❌ RISC-V toolchain checksum mismatch; refusing to extract"
+            rm -f "$TOOLCHAIN_FILE"
+            exit 1
+        fi
+        echo "   ✓ Toolchain checksum verified"
+    else
+        echo "⚠️  No RISCV_TOOLCHAIN_SHA256 supplied; verify the observed digest before trusting this toolchain"
+    fi
+
     tar xzf "$TOOLCHAIN_FILE"
     rm "$TOOLCHAIN_FILE"
 fi

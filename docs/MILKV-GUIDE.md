@@ -87,4 +87,8 @@ sudo screen /dev/ttyUSB0 115200
 # Welcome to Milk-V Duo!
 # login: root
 # password: (просто Enter)
+
+# Сразу после первого входа задайте пароль root командой passwd
+# или установите SSH-ключ. До этого не используйте deploy-milkv.sh:
+# он загружает и запускает бинарник от имени root.
 ```
