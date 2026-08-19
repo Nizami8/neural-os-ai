@@ -25,8 +25,15 @@ pub extern "C" fn main() -> i32 {
     println!("   History: 32 samples (optimized)");
     
     // Добавляем 2 задачи (max для 256MB)
-    adaptive.add_task(1, task1, TaskClass::RealTime);
-    adaptive.add_task(2, task2, TaskClass::Batch);
+    for (id, entry, class) in [
+        (1usize, task1 as fn(), TaskClass::RealTime),
+        (2usize, task2 as fn(), TaskClass::Batch),
+    ] {
+        if adaptive.add_task(id, entry, class).is_err() {
+            eprintln!("❌ Failed to register task {}: invalid task id", id);
+            return 1;
+        }
+    }
 
     println!("🧠 MLP Network: 7→8→1");
     println!("   Momentum SGD enabled");

@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 echo "🔨 Building Neural OS for Milk-V Duo 256M"
 echo "========================================"
@@ -13,26 +14,38 @@ fi
 # Проверяем Rust target
 if ! rustup target list | grep -q "riscv64gc-unknown-linux-gnu (installed)"; then
     echo "📦 Installing Rust target..."
-    rustup target add riscv64gc-unknown-linux-gnu
+    if ! rustup target add riscv64gc-unknown-linux-gnu; then
+        echo "❌ Failed to install Rust target riscv64gc-unknown-linux-gnu"
+        exit 1
+    fi
 fi
 
 echo ""
 echo "  → Compiling Neural OS (userspace binary for Linux)"
 echo ""
 
-cargo build \
+BINARY="target/riscv64gc-unknown-linux-gnu/release/milkv-userspace"
+
+# Старый бинарник прошел бы проверку ниже даже при сломанной сборке
+rm -f "$BINARY"
+
+if ! cargo build \
     --target riscv64gc-unknown-linux-gnu \
     --release \
     --bin milkv-userspace \
-    -Z build-std=core,alloc
-
-if [ ! -f "target/riscv64gc-unknown-linux-gnu/release/milkv-userspace" ]; then
-    echo "❌ Build failed!"
+    -Z build-std=core,alloc; then
+    echo "❌ Build failed (cargo returned a non-zero status)"
     exit 1
 fi
 
-BINARY="target/riscv64gc-unknown-linux-gnu/release/milkv-userspace"
-SIZE=$(stat -f%z "$BINARY" 2>/dev/null || stat -c%s "$BINARY")
+if [ ! -f "$BINARY" ]; then
+    echo "❌ Build reported success but $BINARY is missing"
+    exit 1
+fi
+if ! SIZE=$(stat -f%z "$BINARY" 2>/dev/null || stat -c%s "$BINARY"); then
+    echo "❌ Could not determine size of $BINARY"
+    exit 1
+fi
 SIZE_KB=$((SIZE / 1024))
 
 echo ""

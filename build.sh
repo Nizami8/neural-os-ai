@@ -1,8 +1,19 @@
 #!/bin/bash
+set -euo pipefail
 
 echo "🔨 Building Neural OS v0.9 - Full AI Orchestration Kernel..."
 
+for tool in riscv64-unknown-elf-as riscv64-unknown-elf-ld riscv64-unknown-elf-objcopy riscv64-unknown-elf-size rustc; do
+    if ! command -v "$tool" &> /dev/null; then
+        echo "❌ Required tool not found: $tool"
+        exit 1
+    fi
+done
+
 mkdir -p build
+
+# Старые артефакты могут выдать сломанную сборку за успешную
+rm -f build/start.o build/trap.o build/context_switch.o build/main.o build/kernel.elf build/os.bin
 
 echo "  → Assembling architecture files"
 riscv64-unknown-elf-as start.s -o build/start.o || exit 1
@@ -13,7 +24,6 @@ echo "  → Compiling Rust + AI modules"
 rustc --target riscv64gc-unknown-none-elf \
     -C panic=abort \
     -C opt-level=z \
-    -A warnings \
     --crate-type=lib \
     --emit=obj \
     src/main.rs \

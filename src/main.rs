@@ -9,9 +9,9 @@ mod storage;
 
 use scheduler::Scheduler;
 use trap::init_timer;
-use adaptive::{AdaptiveScheduler, SchedulingStrategy, RewardSignal};
-use neural::TaskClass;
-use storage::PersistentStorage;
+use adaptive::{AdaptiveScheduler, SchedulerError, SchedulingStrategy};
+use neural::{NeuralError, TaskClass};
+use storage::{PersistentStorage, StorageError};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 const UART: *mut u8 = 0x10000000 as *mut u8;
@@ -26,13 +26,13 @@ fn putc(c: u8) {
     unsafe { core::ptr::write_volatile(UART, c); }
 }
 
-fn puts(s: &str) {
+pub(crate) fn puts(s: &str) {
     for b in s.bytes() {
         putc(b);
     }
 }
 
-fn print_number(n: usize) {
+pub(crate) fn print_number(n: usize) {
     if n == 0 {
         putc(b'0');
         return;
@@ -54,15 +54,20 @@ fn print_number(n: usize) {
     }
 }
 
+/// `f32::abs` живет в std, которого в ядре нет.
+fn abs_f32(value: f32) -> f32 {
+    if value < 0.0 { -value } else { value }
+}
+
 fn print_float(f: f32, decimals: usize) {
     let int_part = f as i32;
     if int_part < 0 {
         putc(b'-');
     }
-    print_number(int_part.abs() as usize);
+    print_number(int_part.unsigned_abs() as usize);
     putc(b'.');
     
-    let frac = ((f.abs() - (int_part.abs() as f32)) * 100.0) as usize;
+    let frac = ((abs_f32(f) - (int_part.unsigned_abs() as f32)) * 100.0) as usize;
     if frac < 10 {
         putc(b'0');
     }
@@ -89,9 +94,81 @@ pub unsafe extern "C" fn memset(s: *mut u8, c: i32, n: usize) -> *mut u8 {
     s
 }
 
+/// Сколько ошибок планировщика уже было отчитано в UART.
+static SCHED_ERRORS_REPORTED: AtomicUsize = AtomicUsize::new(0);
+
+/// Сколько первых ошибок печатаем подробно: обработчик таймера срабатывает
+/// 100 раз в секунду, и бесконечный лог сам стал бы проблемой.
+const MAX_REPORTED_SCHED_ERRORS: usize = 8;
+
+fn neural_error_name(error: NeuralError) -> &'static str {
+    match error {
+        NeuralError::NonFiniteTarget => "non-finite target",
+        NeuralError::NonFiniteOutput => "non-finite output",
+        NeuralError::NonFiniteGradient => "non-finite gradient (update rejected)",
+    }
+}
+
+fn storage_error_name(error: StorageError) -> &'static str {
+    match error {
+        StorageError::BufferTooSmall { .. } => "storage buffer too small",
+        StorageError::Empty => "storage empty",
+        StorageError::Corrupted { .. } => "storage corrupted",
+    }
+}
+
+/// Выводит ошибку планировщика в UART с ограничением частоты.
+pub(crate) fn report_scheduler_error(context: &str, error: SchedulerError) {
+    let reported = SCHED_ERRORS_REPORTED.fetch_add(1, Ordering::Relaxed);
+    if reported > MAX_REPORTED_SCHED_ERRORS {
+        return;
+    }
+
+    puts("\n⚠️  ");
+    puts(context);
+    puts(": ");
+
+    match error {
+        SchedulerError::InvalidTaskId(id) => {
+            puts("invalid task id ");
+            print_number(id);
+        }
+        SchedulerError::MissingTask(idx) => {
+            puts("task slot ");
+            print_number(idx);
+            puts(" is empty");
+        }
+        SchedulerError::NoRunnableTask => puts("no runnable task"),
+        SchedulerError::Neural(neural_error) => {
+            puts("neural failure: ");
+            puts(neural_error_name(neural_error));
+        }
+    }
+
+    puts("\n");
+
+    if reported == MAX_REPORTED_SCHED_ERRORS {
+        puts("⚠️  further scheduler errors suppressed, see statistics counters\n");
+    }
+}
+
+fn report_scheduler_error_count() {
+    let total = SCHED_ERRORS_REPORTED.load(Ordering::Relaxed);
+    puts("   Scheduler Errors: ");
+    print_number(total);
+    puts("\n");
+}
+
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    puts("PANIC!\n");
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    puts("\nPANIC");
+    if let Some(location) = info.location() {
+        puts(" at ");
+        puts(location.file());
+        puts(":");
+        print_number(location.line() as usize);
+    }
+    puts("\n");
     loop {}
 }
 
@@ -158,14 +235,43 @@ pub extern "C" fn rust_main() -> ! {
         
         // Инициализируем storage для сохранения весов
         let storage = PersistentStorage::new();
+
+        // Восстанавливаем веса с прошлого запуска, если они есть и валидны.
+        match storage.load_weights() {
+            Ok((hidden_weights, output_weights)) => {
+                match adaptive.neural.load_weights(&hidden_weights, &output_weights) {
+                    Ok(()) => puts("💾 Restored neural weights from persistent storage\n"),
+                    Err(error) => {
+                        puts("⚠️  Rejected stored weights: ");
+                        puts(neural_error_name(error));
+                        puts(" (starting from defaults)\n");
+                    }
+                }
+            }
+            Err(StorageError::Empty) => {
+                puts("💾 No stored weights yet, starting from defaults\n");
+            }
+            Err(error) => {
+                puts("⚠️  Could not load stored weights: ");
+                puts(storage_error_name(error));
+                puts(" (starting from defaults)\n");
+            }
+        }
+
         STORAGE = Some(storage);
 
         puts("📊 Initializing advanced scheduler...\n");
         
         // Добавляем задачи с классами
-        adaptive.add_task(1, task1, TaskClass::RealTime);      // жесткие deadline'ы
-        adaptive.add_task(2, task2, TaskClass::Interactive);   // низкий latency
-        adaptive.add_task(3, task3, TaskClass::Batch);         // фоновая работа
+        if let Err(error) = adaptive.add_task(1, task1, TaskClass::RealTime) {
+            report_scheduler_error("add_task(1)", error);
+        }
+        if let Err(error) = adaptive.add_task(2, task2, TaskClass::Interactive) {
+            report_scheduler_error("add_task(2)", error);
+        }
+        if let Err(error) = adaptive.add_task(3, task3, TaskClass::Batch) {
+            report_scheduler_error("add_task(3)", error);
+        }
 
         puts("🧠 Neural network initialized (MLP 7→8→1)\n");
         puts("   Architecture: Input(7) → Hidden(8, ReLU) → Output(1, Sigmoid)\n");
@@ -183,7 +289,9 @@ pub extern "C" fn rust_main() -> ! {
         puts("\n");
 
         puts("⏱️  Setting task deadlines...\n");
-        adaptive.set_task_deadline(1, 200);  // Task 1: hard deadline через 200 тиков
+        if let Err(error) = adaptive.set_task_deadline(1, 200) {
+            report_scheduler_error("set_task_deadline(1)", error);
+        }
         puts("   T1: 200 ticks (RealTime)\n");
         puts("   T2: unlimited (Interactive)\n");
         puts("   T3: unlimited (Batch)\n");
@@ -211,6 +319,18 @@ pub extern "C" fn rust_main() -> ! {
                 
                 if let Some(ref mut adaptive) = ADAPTIVE_SCHED {
                     adaptive.collect_statistics();
+
+                    // Сохраняем выученные веса, чтобы они пережили перезагрузку.
+                    if let Some(ref mut storage) = STORAGE {
+                        if let Err(error) = storage.save_weights(
+                            &adaptive.neural.hidden_weights,
+                            &adaptive.neural.output_weights,
+                        ) {
+                            puts("⚠️  Failed to persist neural weights: ");
+                            puts(storage_error_name(error));
+                            puts("\n");
+                        }
+                    }
                     
                     puts("\n");
                     puts("📊 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ STATISTICS ━━━━━━━━\n");
@@ -234,6 +354,16 @@ pub extern "C" fn rust_main() -> ! {
                     }
                     print_float(w[3], 2);
                     puts("\n");
+
+                    puts("   Neural Errors: ");
+                    print_number(adaptive.stats.neural_errors as usize);
+                    puts("\n");
+
+                    puts("   Unhandled Interrupts: ");
+                    print_number(trap::unhandled_interrupt_count());
+                    puts("\n");
+
+                    report_scheduler_error_count();
                     
                     puts("────────────────────────────────────────────────────────\n\n");
                 }

@@ -1,4 +1,10 @@
 #!/bin/bash
+set -euo pipefail
+
+fail() {
+    echo "❌ $1"
+    exit 1
+}
 
 echo "🚀 Milk-V Duo 256M Setup Script for Neural OS"
 echo "============================================"
@@ -17,16 +23,17 @@ echo "📦 Step 1: Installing system dependencies..."
 
 if [ "$OS" = "linux" ]; then
     # Ubuntu/Debian
-    sudo apt-get update
+    sudo apt-get update || fail "apt-get update failed"
     sudo apt-get install -y \
         git build-essential python3 python3-dev python3-pip \
         bc u-boot-tools flex bison wget cpio device-tree-compiler \
         dosfstools mtools parted \
-        libssl-dev libncurses-dev riscv64-unknown-elf-gcc
-        
+        libssl-dev libncurses-dev riscv64-unknown-elf-gcc \
+        || fail "apt-get install failed"
+
 elif [ "$OS" = "macos" ]; then
     # macOS
-    brew install git python3 wget dtc mtools parted
+    brew install git python3 wget dtc mtools parted || fail "brew install failed"
 fi
 
 echo "✅ System dependencies installed"
@@ -36,16 +43,16 @@ echo "📥 Step 2: Downloading Milk-V Duo Buildroot SDK..."
 
 # Скачиваем SDK
 mkdir -p ~/milkv-workspace
-cd ~/milkv-workspace
+cd ~/milkv-workspace || fail "Cannot enter ~/milkv-workspace"
 
 if [ ! -d "duo-buildroot-sdk" ]; then
     echo "  → Cloning buildroot SDK..."
-    git clone https://github.com/milkv-duo/duo-buildroot-sdk.git
-    cd duo-buildroot-sdk
+    git clone https://github.com/milkv-duo/duo-buildroot-sdk.git || fail "Cloning buildroot SDK failed"
+    cd duo-buildroot-sdk || fail "Cannot enter duo-buildroot-sdk"
 else
     echo "  → SDK already exists, updating..."
-    cd duo-buildroot-sdk
-    git pull origin master
+    cd duo-buildroot-sdk || fail "Cannot enter duo-buildroot-sdk"
+    git pull origin master || fail "Updating buildroot SDK failed"
 fi
 
 echo "✅ SDK ready at ~/milkv-workspace/duo-buildroot-sdk"
@@ -56,14 +63,16 @@ echo "🔧 Step 3: Installing Rust & RISC-V toolchain..."
 # Установляем Rust
 if ! command -v rustc &> /dev/null; then
     echo "  → Installing Rust..."
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-    source "$HOME/.cargo/env"
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+        || fail "Rust installation failed"
+    # shellcheck disable=SC1091
+    source "$HOME/.cargo/env" || fail "Cannot load Rust environment from $HOME/.cargo/env"
 else
     echo "  → Rust already installed"
 fi
 
 # Добавляем RISC-V target
-rustup target add riscv64gc-unknown-linux-gnu
+rustup target add riscv64gc-unknown-linux-gnu || fail "Cannot add target riscv64gc-unknown-linux-gnu"
 
 # Проверяем GCC
 if ! command -v riscv64-unknown-elf-gcc &> /dev/null; then
@@ -78,9 +87,9 @@ if ! command -v riscv64-unknown-elf-gcc &> /dev/null; then
         TOOLCHAIN_FILE="riscv-toolchain-macos.tar.gz"
     fi
     
-    cd ~/milkv-workspace
-    wget -O "$TOOLCHAIN_FILE" "$TOOLCHAIN_URL"
-    tar xzf "$TOOLCHAIN_FILE"
+    cd ~/milkv-workspace || fail "Cannot enter ~/milkv-workspace"
+    wget -O "$TOOLCHAIN_FILE" "$TOOLCHAIN_URL" || fail "Downloading RISC-V toolchain failed"
+    tar xzf "$TOOLCHAIN_FILE" || fail "Unpacking $TOOLCHAIN_FILE failed"
     rm "$TOOLCHAIN_FILE"
 fi
 
@@ -90,7 +99,7 @@ echo ""
 echo "📋 Step 4: Setting up environment variables..."
 
 # Создаем файл конфигурации
-cat > ~/.milkv-env << 'EOF'
+cat > ~/.milkv-env << 'EOF' || fail "Cannot write ~/.milkv-env"
 #!/bin/bash
 
 # Milk-V Duo Development Environment

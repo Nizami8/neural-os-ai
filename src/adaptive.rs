@@ -1,8 +1,27 @@
 use crate::scheduler::{Scheduler, TaskState};
-use crate::neural::{NeuralScheduler, TaskMetrics, TaskClass};
+use crate::neural::{NeuralError, NeuralScheduler, TaskMetrics, TaskClass};
 
 pub const METRICS_HISTORY_SIZE: usize = 128;
 pub const QUANTUM: u32 = 100;  // 10ms в тиках
+pub const MAX_TASKS: usize = 4;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerError {
+    /// task_id вне диапазона 1..=MAX_TASKS — запрос не был выполнен
+    InvalidTaskId(usize),
+    /// Выбранный или текущий слот оказался пустым: переключение невозможно
+    MissingTask(usize),
+    /// Нет ни одной готовой задачи
+    NoRunnableTask,
+    /// Нейросеть не смогла дать корректный приоритет
+    Neural(NeuralError),
+}
+
+impl From<NeuralError> for SchedulerError {
+    fn from(error: NeuralError) -> Self {
+        SchedulerError::Neural(error)
+    }
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum SchedulingStrategy {
@@ -57,7 +76,7 @@ impl MetricsCollector {
                 task_id,
                 execution_time: avg_exec / count,
                 wait_time: avg_wait / count,
-                memory_used: avg_mem / count,
+                memory_used: avg_mem / (count as usize),
                 ticks_since_run: avg_ticks / count,
                 io_wait_count: avg_io / count,
                 context_switches: avg_ctx / count,
@@ -71,7 +90,11 @@ impl MetricsCollector {
     }
 
     pub fn count_for_task(&self, task_id: usize) -> usize {
-        self.history.iter().filter(|m| m.is_some() && m.unwrap().task_id == task_id).count()
+        self.history
+            .iter()
+            .filter_map(|m| m.as_ref())
+            .filter(|m| m.task_id == task_id)
+            .count()
     }
 }
 
@@ -82,6 +105,8 @@ pub struct OSStatistics {
     pub avg_wait_time: f32,
     pub cpu_utilization: f32,
     pub fairness_index: f32,  // 0-1, близко к 1 = справедливо
+    /// Сколько раз нейросеть вернула ошибку (NaN/Inf в предсказании или обучении)
+    pub neural_errors: u32,
 }
 
 pub struct RewardSignal {
@@ -128,6 +153,7 @@ impl AdaptiveScheduler {
                 avg_wait_time: 0.0,
                 cpu_utilization: 0.0,
                 fairness_index: 1.0,
+                neural_errors: 0,
             },
             strategy: SchedulingStrategy::LoadBalanced,
             
@@ -137,15 +163,25 @@ impl AdaptiveScheduler {
         }
     }
 
-    pub fn add_task(&mut self, id: usize, entry: fn(), task_class: TaskClass) {
+    /// Добавляет задачу. `id` вне диапазона 1..=MAX_TASKS — ошибка:
+    /// иначе task_class терялся бы и задача осталась бы в классе Batch.
+    pub fn add_task(&mut self, id: usize, entry: fn(), task_class: TaskClass) -> Result<(), SchedulerError> {
+        let idx = Self::task_index(id)?;
         self.base_scheduler.add_task(id, entry);
-        if id > 0 && id <= 4 {
-            self.task_classes[id - 1] = task_class;
+        self.task_classes[idx] = task_class;
+        Ok(())
+    }
+
+    fn task_index(task_id: usize) -> Result<usize, SchedulerError> {
+        if task_id > 0 && task_id <= MAX_TASKS {
+            Ok(task_id - 1)
+        } else {
+            Err(SchedulerError::InvalidTaskId(task_id))
         }
     }
 
     /// Load-balanced selection с fairness
-    pub fn select_next_task_balanced(&mut self) -> usize {
+    pub fn select_next_task_balanced(&mut self) -> Result<usize, SchedulerError> {
         let current_tick = self.base_scheduler.tick as u32;
         let mut best_priority = -1.0f32;
         let mut best_idx = self.base_scheduler.current;
@@ -153,7 +189,10 @@ impl AdaptiveScheduler {
         // Вычисляем среднее время выполнения
         let mut total_time = 0u32;
         let mut count = 0;
-        for i in 0..4 {
+        let mut ready_tasks = 0;
+        let mut neural_errors = 0u32;
+        let mut last_neural_error = None;
+        for i in 0..MAX_TASKS {
             if self.base_scheduler.tasks[i].is_some() {
                 total_time = total_time.saturating_add(self.total_exec_time[i]);
                 count += 1;
@@ -163,16 +202,27 @@ impl AdaptiveScheduler {
         let avg_time = if count > 0 { total_time / count } else { 1 };
         let fair_share = if count > 0 { 1.0 / (count as f32) } else { 0.25 };
 
-        for i in 0..4 {
+        for i in 0..MAX_TASKS {
             if let Some(task) = &self.base_scheduler.tasks[i] {
                 if task.state == TaskState::Ready {
+                    ready_tasks += 1;
+
                     let mut metrics = TaskMetrics::new(task.id);
                     metrics.execution_time = self.total_exec_time[i];
                     metrics.wait_time = current_tick.saturating_sub(self.last_execution_tick[i]);
                     metrics.ticks_since_run = metrics.wait_time;
                     metrics.context_switches = self.stats.total_context_switches as u32;
-                    
-                    let mut priority = self.neural.predict_priority(&metrics);
+
+                    // NaN всегда проигрывает сравнению приоритетов, поэтому сбой сети
+                    // учитывается явно, а не прячется в выборе задачи.
+                    let mut priority = match self.neural.predict_priority(&metrics) {
+                        Ok(priority) => priority,
+                        Err(error) => {
+                            neural_errors += 1;
+                            last_neural_error = Some(error);
+                            continue;
+                        }
+                    };
                     
                     // RealTime boost
                     if self.task_classes[i] == TaskClass::RealTime {
@@ -202,7 +252,20 @@ impl AdaptiveScheduler {
             }
         }
 
-        best_idx
+        self.stats.neural_errors = self.stats.neural_errors.saturating_add(neural_errors);
+
+        if ready_tasks == 0 {
+            return Err(SchedulerError::NoRunnableTask);
+        }
+
+        // Все готовые задачи отвалились из-за сети: сообщаем об этом вверх.
+        if let Some(error) = last_neural_error {
+            if neural_errors as usize == ready_tasks {
+                return Err(SchedulerError::Neural(error));
+            }
+        }
+
+        Ok(best_idx)
     }
 
     /// Предсказываем, когда надо переключиться
@@ -238,10 +301,11 @@ impl AdaptiveScheduler {
     }
 
     /// Q-learning с reward signal
-    pub fn learn_with_reward(&mut self, signal: RewardSignal) {
-        let task_idx = signal.task_id.saturating_sub(1);
-        if task_idx >= 4 {
-            return;
+    pub fn learn_with_reward(&mut self, signal: RewardSignal) -> Result<(), SchedulerError> {
+        let task_idx = Self::task_index(signal.task_id)?;
+
+        if !signal.reward.is_finite() {
+            return Err(SchedulerError::Neural(NeuralError::NonFiniteTarget));
         }
         
         // Обновляем Q-value для этой задачи
@@ -259,16 +323,22 @@ impl AdaptiveScheduler {
         let target = (signal.reward + 1.0) / 2.0;  // normalize to [0, 1]
         let mut metrics = TaskMetrics::new(signal.task_id);
         metrics.execution_time = self.total_exec_time[task_idx];
-        self.neural.learn(&metrics, target);
+
+        if let Err(error) = self.neural.learn(&metrics, target) {
+            self.stats.neural_errors = self.stats.neural_errors.saturating_add(1);
+            return Err(SchedulerError::Neural(error));
+        }
+
+        Ok(())
     }
 
     /// Основное адаптивное расписание
-    pub fn adaptive_schedule(&mut self) {
+    pub fn adaptive_schedule(&mut self) -> Result<(), SchedulerError> {
         self.base_scheduler.tick += 1;
         let current_tick = self.base_scheduler.tick as u32;
 
         // Обновляем deadlines
-        for i in 0..4 {
+        for i in 0..MAX_TASKS {
             if self.task_deadlines[i] > 0 {
                 self.task_deadlines[i] = self.task_deadlines[i].saturating_sub(1);
             }
@@ -279,11 +349,11 @@ impl AdaptiveScheduler {
             SchedulingStrategy::NeuralOnly => {
                 let mut best_priority = -1.0f32;
                 let mut best_idx = self.base_scheduler.current;
-                for i in 0..4 {
+                for i in 0..MAX_TASKS {
                     if let Some(task) = &self.base_scheduler.tasks[i] {
                         if task.state == TaskState::Ready {
                             let metrics = TaskMetrics::new(task.id);
-                            let priority = self.neural.predict_priority(&metrics);
+                            let priority = self.neural.predict_priority(&metrics)?;
                             if priority > best_priority {
                                 best_priority = priority;
                                 best_idx = i;
@@ -293,10 +363,19 @@ impl AdaptiveScheduler {
                 }
                 best_idx
             },
-            SchedulingStrategy::LoadBalanced => self.select_next_task_balanced(),
+            SchedulingStrategy::LoadBalanced => match self.select_next_task_balanced() {
+                Ok(idx) => idx,
+                // Нет готовых альтернатив — это норма, продолжаем текущую задачу.
+                Err(SchedulerError::NoRunnableTask) => return Ok(()),
+                Err(error) => return Err(error),
+            },
             SchedulingStrategy::PredictivePreempt => {
                 if self.predict_preemption(self.base_scheduler.current) {
-                    self.select_next_task_balanced()
+                    match self.select_next_task_balanced() {
+                        Ok(idx) => idx,
+                        Err(SchedulerError::NoRunnableTask) => return Ok(()),
+                        Err(error) => return Err(error),
+                    }
                 } else {
                     self.base_scheduler.current
                 }
@@ -304,41 +383,77 @@ impl AdaptiveScheduler {
         };
 
         // Переключаемся на выбранную задачу
-        if next_idx != self.base_scheduler.current {
-            if let (Some(old_task), Some(new_task)) = (
-                self.base_scheduler.tasks[self.base_scheduler.current].as_mut(),
-                self.base_scheduler.tasks[next_idx].as_mut(),
-            ) {
-                // Обновляем статистику
-                let exec_time = current_tick.saturating_sub(self.execution_start_time[self.base_scheduler.current]);
-                self.total_exec_time[self.base_scheduler.current] = self.total_exec_time[self.base_scheduler.current].saturating_add(exec_time);
-                
-                old_task.state = TaskState::Ready;
-                new_task.state = TaskState::Running;
+        if next_idx == self.base_scheduler.current {
+            return Ok(());
+        }
 
-                let mut metrics = TaskMetrics::new(new_task.id);
-                metrics.execution_time = exec_time;
-                metrics.wait_time = current_tick.saturating_sub(self.last_execution_tick[next_idx]);
-                metrics.ticks_since_run = metrics.wait_time;
-                metrics.context_switches = (self.stats.total_context_switches as u32) % 255;
+        let current_idx = self.base_scheduler.current;
 
-                self.metrics.record(metrics);
-                self.last_execution_tick[next_idx] = current_tick;
-                self.execution_start_time[next_idx] = current_tick;
+        // Пустой слот делает переключение невозможным: сообщаем вызывающему коду,
+        // иначе система остается на одной задаче без каких-либо признаков сбоя.
+        if self.base_scheduler.tasks[current_idx].is_none() {
+            return Err(SchedulerError::MissingTask(current_idx));
+        }
+        if self.base_scheduler.tasks[next_idx].is_none() {
+            return Err(SchedulerError::MissingTask(next_idx));
+        }
 
-                // Online learning
-                let target = if metrics.wait_time > 50 { 1.0 } else { 0.7 };
-                self.neural.learn(&metrics, target);
+        // Обновляем статистику
+        let exec_time = current_tick.saturating_sub(self.execution_start_time[current_idx]);
+        self.total_exec_time[current_idx] = self.total_exec_time[current_idx].saturating_add(exec_time);
 
-                self.base_scheduler.current = next_idx;
-                self.stats.total_context_switches += 1;
-                self.stats.total_preemptions += 1;
+        let new_task_id = match &self.base_scheduler.tasks[next_idx] {
+            Some(task) => task.id,
+            None => return Err(SchedulerError::MissingTask(next_idx)),
+        };
 
-                unsafe {
-                    crate::scheduler::context_switch(&mut old_task.context, &mut new_task.context);
-                }
+        let mut metrics = TaskMetrics::new(new_task_id);
+        metrics.execution_time = exec_time;
+        metrics.wait_time = current_tick.saturating_sub(self.last_execution_tick[next_idx]);
+        metrics.ticks_since_run = metrics.wait_time;
+        metrics.context_switches = (self.stats.total_context_switches as u32) % 255;
+
+        self.metrics.record(metrics);
+        self.last_execution_tick[next_idx] = current_tick;
+        self.execution_start_time[next_idx] = current_tick;
+
+        // Ошибка online-обучения не отменяет переключение, но и не теряется:
+        // она возвращается вызывающему коду после context switch.
+        let target = if metrics.wait_time > 50 { 1.0 } else { 0.7 };
+        let learn_result = self.neural.learn(&metrics, target);
+        if learn_result.is_err() {
+            self.stats.neural_errors = self.stats.neural_errors.saturating_add(1);
+        }
+
+        self.base_scheduler.current = next_idx;
+        self.stats.total_context_switches += 1;
+        self.stats.total_preemptions += 1;
+
+        {
+            let (left, right) = if current_idx < next_idx {
+                self.base_scheduler.tasks.split_at_mut(next_idx)
+            } else {
+                self.base_scheduler.tasks.split_at_mut(current_idx)
+            };
+
+            let (old_slot, new_slot) = if current_idx < next_idx {
+                (&mut left[current_idx], &mut right[0])
+            } else {
+                (&mut right[0], &mut left[next_idx])
+            };
+
+            let old_task = old_slot.as_mut().ok_or(SchedulerError::MissingTask(current_idx))?;
+            let new_task = new_slot.as_mut().ok_or(SchedulerError::MissingTask(next_idx))?;
+
+            old_task.state = TaskState::Ready;
+            new_task.state = TaskState::Running;
+
+            unsafe {
+                crate::scheduler::context_switch(&mut old_task.context, &mut new_task.context);
             }
         }
+
+        learn_result.map(|_| ()).map_err(SchedulerError::Neural)
     }
 
     pub fn get_neural_weights(&self) -> [f32; 8] {
@@ -349,7 +464,7 @@ impl AdaptiveScheduler {
         let mut total_wait = 0u32;
         let mut wait_count = 0;
         
-        for i in 0..4 {
+        for i in 0..MAX_TASKS {
             if self.base_scheduler.tasks[i].is_some() {
                 let wait = (self.base_scheduler.tick as u32).saturating_sub(self.last_execution_tick[i]);
                 total_wait = total_wait.saturating_add(wait);
@@ -384,9 +499,9 @@ impl AdaptiveScheduler {
         self.metrics = MetricsCollector::new();
     }
 
-    pub fn set_task_deadline(&mut self, task_id: usize, ticks: u32) {
-        if task_id > 0 && task_id <= 4 {
-            self.task_deadlines[task_id - 1] = ticks;
-        }
+    pub fn set_task_deadline(&mut self, task_id: usize, ticks: u32) -> Result<(), SchedulerError> {
+        let idx = Self::task_index(task_id)?;
+        self.task_deadlines[idx] = ticks;
+        Ok(())
     }
 }
