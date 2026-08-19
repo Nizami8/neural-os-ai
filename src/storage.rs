@@ -73,3 +73,73 @@ impl PersistentStorage {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_creates_a_zeroed_32_slot_buffer() {
+        let storage = PersistentStorage::new();
+        assert_eq!(storage.buffer, [0; 32]);
+    }
+
+    #[test]
+    fn save_weights_truncates_hidden_weights_and_skips_output_weights() {
+        let mut storage = PersistentStorage::new();
+        let mut weights = [[0.0; 7]; 8];
+        let mut next = 1.0;
+        for row in &mut weights {
+            for value in row {
+                *value = next;
+                next += 1.0;
+            }
+        }
+        let output_weights = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0];
+
+        storage.save_weights(&weights, &output_weights);
+
+        // The 32-slot buffer truncates the 56 hidden weights before outputs.
+        for (slot, value) in storage.buffer.iter().enumerate() {
+            assert_eq!(*value, (slot as f32 + 1.0).to_bits());
+        }
+        assert!(!storage
+            .buffer
+            .iter()
+            .any(|bits| output_weights.iter().any(|weight| *bits == weight.to_bits())));
+
+        let round_trip: Vec<f32> = storage
+            .buffer
+            .iter()
+            .map(|bits| f32::from_bits(*bits))
+            .collect();
+        assert_eq!(
+            round_trip,
+            (1..=32).map(|value| value as f32).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn load_weights_returns_none_before_and_after_saving() {
+        let mut storage = PersistentStorage::new();
+        assert!(storage.load_weights().is_none());
+
+        let weights = [[1.0; 7]; 8];
+        let output_weights = [2.0; 8];
+        storage.save_weights(&weights, &output_weights);
+
+        // Loading exhausts the buffer on hidden weights before outputs are read.
+        assert!(storage.load_weights().is_none());
+    }
+
+    #[test]
+    fn clear_zeroes_saved_buffer() {
+        let mut storage = PersistentStorage::new();
+        storage.save_weights(&[[1.0; 7]; 8], &[2.0; 8]);
+        assert_ne!(storage.buffer, [0; 32]);
+
+        storage.clear();
+
+        assert_eq!(storage.buffer, [0; 32]);
+    }
+}

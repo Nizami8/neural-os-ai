@@ -110,6 +110,14 @@ Live statistics every 1000 ticks:
 
 ## 🚀 Build & Run
 
+### Running unit tests
+
+Run the host-target unit tests with:
+
+```bash
+cargo test --target x86_64-unknown-linux-gnu
+```
+
 ```bash
 chmod +x build.sh run.sh
 ./build.sh
