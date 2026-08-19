@@ -1,31 +1,25 @@
 #!/bin/bash
 
-echo "🚀 Deploying Neural OS to Milk-V Duo"
-echo "===================================="
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/common.sh"
 
-# Параметры
-MILKV_IP="${1:-192.168.1.100}"
-MILKV_USER="root"
-BINARY="target/riscv64gc-unknown-linux-gnu/release/milkv-userspace"
+banner "🚀 Deploying Neural OS to Milk-V Duo"
 
-if [ ! -f "$BINARY" ]; then
-    echo "❌ Binary not found: $BINARY"
-    echo "   Run: ./build-milkv.sh first"
-    exit 1
-fi
+MILKV_IP="${1:-$MILKV_DEFAULT_IP}"
+
+require_file "$MILKV_BINARY" "Run: ./build-milkv.sh first"
 
 echo ""
 echo "1️⃣  Finding Milk-V Duo IP address..."
 
 # Попытаемся ping'ануть
 if ! ping -c 1 "$MILKV_IP" &> /dev/null; then
-    echo "⚠️  Could not reach $MILKV_IP"
-    echo "   Trying to find via nmap..."
-    
-    if command -v nmap &> /dev/null; then
+    warn "Could not reach $MILKV_IP"
+    step "Trying to find via nmap..."
+
+    if have_cmd nmap; then
         nmap -sn 192.168.1.0/24 | grep -i "milkv\\|duo\\|sg2042" || true
     fi
-    
+
     echo "   Manually specify IP: ./deploy-milkv.sh <IP>"
     read -p "   Enter IP: " MILKV_IP
 fi
@@ -36,9 +30,7 @@ echo ""
 echo "2️⃣  Checking SSH connection..."
 
 if ! ssh -q -o ConnectTimeout=2 "$MILKV_USER@$MILKV_IP" "echo OK" &>/dev/null; then
-    echo "❌ Cannot SSH to $MILKV_USER@$MILKV_IP"
-    echo "   Maybe: ssh-keygen -R $MILKV_IP"
-    exit 1
+    die "Cannot SSH to $MILKV_USER@$MILKV_IP" "Maybe: ssh-keygen -R $MILKV_IP"
 fi
 
 echo "   ✓ SSH connected"
@@ -46,18 +38,18 @@ echo "   ✓ SSH connected"
 echo ""
 echo "3️⃣  Uploading binary..."
 
-scp -q "$BINARY" "$MILKV_USER@$MILKV_IP:/root/neural-os"
-chmod +x /tmp/neural-os
+run scp -q "$MILKV_BINARY" "$MILKV_USER@$MILKV_IP:$MILKV_REMOTE_PATH"
+run ssh "$MILKV_USER@$MILKV_IP" "chmod +x $MILKV_REMOTE_PATH"
 
 echo "   ✓ Binary uploaded"
 
 echo ""
 echo "4️⃣  Running Neural OS..."
 echo ""
-echo "════════════════════════════════════════"
+separator
 
-ssh "$MILKV_USER@$MILKV_IP" "/root/neural-os"
+ssh "$MILKV_USER@$MILKV_IP" "$MILKV_REMOTE_PATH"
 
 echo ""
-echo "════════════════════════════════════════"
-echo "✅ Done!"
+separator
+ok "Done!"

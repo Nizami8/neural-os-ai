@@ -9,6 +9,8 @@ mod adaptive;
 use adaptive::AdaptiveScheduler;
 use neural::TaskClass;
 
+const SEPARATOR: &str = "═══════════════════════════════════════";
+
 #[cfg(test)]
 fn main() {}
 
@@ -16,7 +18,7 @@ fn main() {}
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
     println!("\n🤖 Neural OS v0.9 - Milk-V Duo 256M Optimized");
-    println!("═══════════════════════════════════════");
+    println!("{}", SEPARATOR);
 
     let mut adaptive = AdaptiveScheduler::new();
 
@@ -32,7 +34,7 @@ pub extern "C" fn main() -> i32 {
     println!("   Momentum SGD enabled");
     
     println!("⏱️  Starting 10ms quantum timers...");
-    println!("═══════════════════════════════════════\n");
+    println!("{}\n", SEPARATOR);
 
     // Эмулируем scheduler в цикле
     let mut tick = 0;
@@ -61,36 +63,30 @@ pub extern "C" fn main() -> i32 {
                 print!("{:.3}", w);
             }
             println!();
-            println!("═══════════════════════════════════════\n");
+            println!("{}\n", SEPARATOR);
+        }
+    }
+}
+
+/// Бесконечная задача: печатает свой счетчик и жжет busy_cycles тактов
+fn counter_task(id: usize, busy_cycles: usize) -> ! {
+    let mut counter = 0u64;
+    loop {
+        print!("[T{}:{}]", id, counter);
+        counter = counter.wrapping_add(1);
+
+        for _ in 0..busy_cycles {
+            unsafe { core::arch::asm!("nop") };
         }
     }
 }
 
 fn task1() {
-    let mut counter = 0u64;
-    loop {
-        print!("[T1:{}", counter);
-        print!("]");
-        counter += 1;
-        
-        // Небольшая работа
-        for _ in 0..50 {
-            core::arch::asm!("nop");
-        }
-    }
+    counter_task(1, 50)
 }
 
 fn task2() {
-    let mut counter = 0u64;
-    loop {
-        print!("[T2:{}", counter);
-        print!("]");
-        counter += 1;
-        
-        for _ in 0..100 {
-            core::arch::asm!("nop");
-        }
-    }
+    counter_task(2, 100)
 }
 
 #[cfg(test)]

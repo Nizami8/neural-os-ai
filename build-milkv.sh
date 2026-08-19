@@ -1,49 +1,40 @@
 #!/bin/bash
 
-echo "🔨 Building Neural OS for Milk-V Duo 256M"
-echo "========================================"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/common.sh"
 
-# Проверяем toolchain
-if ! command -v riscv64-unknown-linux-gnu-gcc &> /dev/null; then
-    echo "❌ Error: riscv64-unknown-linux-gnu-gcc not found"
-    echo "   Run: source ~/.milkv-env"
-    exit 1
-fi
+banner "🔨 Building Neural OS for Milk-V Duo 256M"
+
+require_cmd riscv64-unknown-linux-gnu-gcc "Run: source ~/.milkv-env"
 
 # Проверяем Rust target
-if ! rustup target list | grep -q "riscv64gc-unknown-linux-gnu (installed)"; then
+if ! rustup target list | grep -q "$MILKV_TARGET (installed)"; then
     echo "📦 Installing Rust target..."
-    rustup target add riscv64gc-unknown-linux-gnu
+    rustup target add "$MILKV_TARGET"
 fi
 
 echo ""
-echo "  → Compiling Neural OS (userspace binary for Linux)"
+step "Compiling Neural OS (userspace binary for Linux)"
 echo ""
 
 cargo build \
-    --target riscv64gc-unknown-linux-gnu \
+    --target "$MILKV_TARGET" \
     --release \
     --bin milkv-userspace \
     -Z build-std=core,alloc
 
-if [ ! -f "target/riscv64gc-unknown-linux-gnu/release/milkv-userspace" ]; then
-    echo "❌ Build failed!"
-    exit 1
-fi
+require_file "$MILKV_BINARY" "Build failed!"
 
-BINARY="target/riscv64gc-unknown-linux-gnu/release/milkv-userspace"
-SIZE=$(stat -f%z "$BINARY" 2>/dev/null || stat -c%s "$BINARY")
-SIZE_KB=$((SIZE / 1024))
+SIZE_KB=$(file_size_kb "$MILKV_BINARY")
 
 echo ""
-echo "✅ Build successful!"
+ok "Build successful!"
 echo ""
 echo "📊 Binary Information:"
-echo "   File: $BINARY"
+echo "   File: $MILKV_BINARY"
 echo "   Size: ${SIZE_KB} KB"
 echo ""
 echo "📋 Ready to deploy:"
-echo "   1. scp $BINARY root@192.168.1.100:/root/neural-os"
-echo "   2. ssh root@192.168.1.100"
-echo "   3. /root/neural-os"
+echo "   1. scp $MILKV_BINARY $MILKV_USER@$MILKV_DEFAULT_IP:$MILKV_REMOTE_PATH"
+echo "   2. ssh $MILKV_USER@$MILKV_DEFAULT_IP"
+echo "   3. $MILKV_REMOTE_PATH"
 echo ""

@@ -3,6 +3,16 @@ use crate::neural::{NeuralScheduler, TaskMetrics, TaskClass};
 
 pub const METRICS_HISTORY_SIZE: usize = 128;
 pub const QUANTUM: u32 = 100;  // 10ms в тиках
+pub const MAX_TASKS: usize = 4;
+
+/// Переводит 1-based task id в индекс массивов планировщика
+pub fn task_index(task_id: usize) -> Option<usize> {
+    if task_id > 0 && task_id <= MAX_TASKS {
+        Some(task_id - 1)
+    } else {
+        None
+    }
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum SchedulingStrategy {
@@ -93,18 +103,18 @@ pub struct AdaptiveScheduler {
     pub base_scheduler: Scheduler,
     pub neural: NeuralScheduler,
     pub metrics: MetricsCollector,
-    pub last_execution_tick: [u32; 4],
-    pub task_classes: [TaskClass; 4],
-    pub task_deadlines: [u32; 4],
-    pub execution_start_time: [u32; 4],
-    pub total_exec_time: [u32; 4],  // для fairness
+    pub last_execution_tick: [u32; MAX_TASKS],
+    pub task_classes: [TaskClass; MAX_TASKS],
+    pub task_deadlines: [u32; MAX_TASKS],
+    pub execution_start_time: [u32; MAX_TASKS],
+    pub total_exec_time: [u32; MAX_TASKS],  // для fairness
     
     // Статистика
     pub stats: OSStatistics,
     pub strategy: SchedulingStrategy,
     
     // Q-learning для reinforcement
-    pub q_values: [[f32; 4]; 4],  // [task][action]
+    pub q_values: [[f32; MAX_TASKS]; MAX_TASKS],  // [task][action]
     pub q_learning_rate: f32,
     pub q_discount: f32,
 }
@@ -115,11 +125,11 @@ impl AdaptiveScheduler {
             base_scheduler: Scheduler::new(),
             neural: NeuralScheduler::new(),
             metrics: MetricsCollector::new(),
-            last_execution_tick: [0; 4],
-            task_classes: [TaskClass::Batch; 4],
-            task_deadlines: [0; 4],
-            execution_start_time: [0; 4],
-            total_exec_time: [0; 4],
+            last_execution_tick: [0; MAX_TASKS],
+            task_classes: [TaskClass::Batch; MAX_TASKS],
+            task_deadlines: [0; MAX_TASKS],
+            execution_start_time: [0; MAX_TASKS],
+            total_exec_time: [0; MAX_TASKS],
             
             stats: OSStatistics {
                 total_context_switches: 0,
@@ -131,7 +141,7 @@ impl AdaptiveScheduler {
             },
             strategy: SchedulingStrategy::LoadBalanced,
             
-            q_values: [[0.0; 4]; 4],
+            q_values: [[0.0; MAX_TASKS]; MAX_TASKS],
             q_learning_rate: 0.1,
             q_discount: 0.9,
         }
@@ -139,61 +149,28 @@ impl AdaptiveScheduler {
 
     pub fn add_task(&mut self, id: usize, entry: fn(), task_class: TaskClass) {
         self.base_scheduler.add_task(id, entry);
-        if id > 0 && id <= 4 {
-            self.task_classes[id - 1] = task_class;
+        if let Some(idx) = task_index(id) {
+            self.task_classes[idx] = task_class;
         }
     }
 
-    /// Load-balanced selection с fairness
-    pub fn select_next_task_balanced(&mut self) -> usize {
-        let current_tick = self.base_scheduler.tick as u32;
+    /// Индексы слотов, в которых есть задача
+    fn occupied_slots(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..MAX_TASKS).filter(move |&i| self.base_scheduler.tasks[i].is_some())
+    }
+
+    /// Выбирает Ready-задачу с наибольшим скором; score получает (индекс, task id)
+    fn select_best_ready<F>(&self, score: F) -> usize
+    where
+        F: Fn(usize, usize) -> f32,
+    {
         let mut best_priority = -1.0f32;
         let mut best_idx = self.base_scheduler.current;
-        
-        // Вычисляем среднее время выполнения
-        let mut total_time = 0u32;
-        let mut count = 0;
-        for i in 0..4 {
-            if self.base_scheduler.tasks[i].is_some() {
-                total_time = total_time.saturating_add(self.total_exec_time[i]);
-                count += 1;
-            }
-        }
-        
-        let avg_time = if count > 0 { total_time / count } else { 1 };
-        let fair_share = if count > 0 { 1.0 / (count as f32) } else { 0.25 };
 
-        for i in 0..4 {
+        for i in 0..MAX_TASKS {
             if let Some(task) = &self.base_scheduler.tasks[i] {
                 if task.state == TaskState::Ready {
-                    let mut metrics = TaskMetrics::new(task.id);
-                    metrics.execution_time = self.total_exec_time[i];
-                    metrics.wait_time = current_tick.saturating_sub(self.last_execution_tick[i]);
-                    metrics.ticks_since_run = metrics.wait_time;
-                    metrics.context_switches = self.stats.total_context_switches as u32;
-                    
-                    let mut priority = self.neural.predict_priority(&metrics);
-                    
-                    // RealTime boost
-                    if self.task_classes[i] == TaskClass::RealTime {
-                        if self.task_deadlines[i] > 0 && self.task_deadlines[i] < QUANTUM / 2 {
-                            priority += 2.0;  // Высокий приоритет перед deadline
-                        }
-                    }
-                    
-                    // Fairness penalty
-                    let usage_ratio = (self.total_exec_time[i] as f32) / (avg_time as f32).max(1.0);
-                    if usage_ratio > fair_share * 2.0 {
-                        priority -= 0.5;  // Penalize если уже много выполнялась
-                    }
-                    
-                    // Interactive boost
-                    if self.task_classes[i] == TaskClass::Interactive {
-                        if metrics.wait_time > 20 {
-                            priority += 0.3;  // Low latency boost
-                        }
-                    }
-                    
+                    let priority = score(i, task.id);
                     if priority > best_priority {
                         best_priority = priority;
                         best_idx = i;
@@ -203,6 +180,54 @@ impl AdaptiveScheduler {
         }
 
         best_idx
+    }
+
+    /// Load-balanced selection с fairness
+    pub fn select_next_task_balanced(&self) -> usize {
+        let current_tick = self.base_scheduler.tick as u32;
+
+        // Вычисляем среднее время выполнения
+        let mut total_time = 0u32;
+        let mut count = 0u32;
+        for i in self.occupied_slots() {
+            total_time = total_time.saturating_add(self.total_exec_time[i]);
+            count += 1;
+        }
+
+        let avg_time = if count > 0 { total_time / count } else { 1 };
+        let fair_share = if count > 0 { 1.0 / (count as f32) } else { 0.25 };
+
+        self.select_best_ready(|i, task_id| {
+            let metrics = TaskMetrics::with_timing(
+                task_id,
+                self.total_exec_time[i],
+                current_tick.saturating_sub(self.last_execution_tick[i]),
+                self.stats.total_context_switches as u32,
+            );
+            let mut priority = self.neural.predict_priority(&metrics);
+
+            // RealTime boost
+            if self.task_classes[i] == TaskClass::RealTime {
+                if self.task_deadlines[i] > 0 && self.task_deadlines[i] < QUANTUM / 2 {
+                    priority += 2.0;  // Высокий приоритет перед deadline
+                }
+            }
+
+            // Fairness penalty
+            let usage_ratio = (self.total_exec_time[i] as f32) / (avg_time as f32).max(1.0);
+            if usage_ratio > fair_share * 2.0 {
+                priority -= 0.5;  // Penalize если уже много выполнялась
+            }
+
+            // Interactive boost
+            if self.task_classes[i] == TaskClass::Interactive {
+                if metrics.wait_time > 20 {
+                    priority += 0.3;  // Low latency boost
+                }
+            }
+
+            priority
+        })
     }
 
     /// Предсказываем, когда надо переключиться
@@ -239,11 +264,11 @@ impl AdaptiveScheduler {
 
     /// Q-learning с reward signal
     pub fn learn_with_reward(&mut self, signal: RewardSignal) {
-        let task_idx = signal.task_id.saturating_sub(1);
-        if task_idx >= 4 {
-            return;
-        }
-        
+        let task_idx = match task_index(signal.task_id) {
+            Some(idx) => idx,
+            None => return,
+        };
+
         // Обновляем Q-value для этой задачи
         let current_q = self.q_values[task_idx][0];
         let future_max_q = self.q_values[task_idx].iter()
@@ -268,7 +293,7 @@ impl AdaptiveScheduler {
         let current_tick = self.base_scheduler.tick as u32;
 
         // Обновляем deadlines
-        for i in 0..4 {
+        for i in 0..MAX_TASKS {
             if self.task_deadlines[i] > 0 {
                 self.task_deadlines[i] = self.task_deadlines[i].saturating_sub(1);
             }
@@ -276,23 +301,9 @@ impl AdaptiveScheduler {
 
         // Выбираем следующую задачу в зависимости от стратегии
         let next_idx = match self.strategy {
-            SchedulingStrategy::NeuralOnly => {
-                let mut best_priority = -1.0f32;
-                let mut best_idx = self.base_scheduler.current;
-                for i in 0..4 {
-                    if let Some(task) = &self.base_scheduler.tasks[i] {
-                        if task.state == TaskState::Ready {
-                            let metrics = TaskMetrics::new(task.id);
-                            let priority = self.neural.predict_priority(&metrics);
-                            if priority > best_priority {
-                                best_priority = priority;
-                                best_idx = i;
-                            }
-                        }
-                    }
-                }
-                best_idx
-            },
+            SchedulingStrategy::NeuralOnly => self.select_best_ready(|_, task_id| {
+                self.neural.predict_priority(&TaskMetrics::new(task_id))
+            }),
             SchedulingStrategy::LoadBalanced => self.select_next_task_balanced(),
             SchedulingStrategy::PredictivePreempt => {
                 if self.predict_preemption(self.base_scheduler.current) {
@@ -316,11 +327,12 @@ impl AdaptiveScheduler {
                 old_task.state = TaskState::Ready;
                 new_task.state = TaskState::Running;
 
-                let mut metrics = TaskMetrics::new(new_task.id);
-                metrics.execution_time = exec_time;
-                metrics.wait_time = current_tick.saturating_sub(self.last_execution_tick[next_idx]);
-                metrics.ticks_since_run = metrics.wait_time;
-                metrics.context_switches = (self.stats.total_context_switches as u32) % 255;
+                let metrics = TaskMetrics::with_timing(
+                    new_task.id,
+                    exec_time,
+                    current_tick.saturating_sub(self.last_execution_tick[next_idx]),
+                    (self.stats.total_context_switches as u32) % 255,
+                );
 
                 self.metrics.record(metrics);
                 self.last_execution_tick[next_idx] = current_tick;
@@ -348,15 +360,13 @@ impl AdaptiveScheduler {
     pub fn collect_statistics(&mut self) {
         let mut total_wait = 0u32;
         let mut wait_count = 0;
-        
-        for i in 0..4 {
-            if self.base_scheduler.tasks[i].is_some() {
-                let wait = (self.base_scheduler.tick as u32).saturating_sub(self.last_execution_tick[i]);
-                total_wait = total_wait.saturating_add(wait);
-                wait_count += 1;
-            }
+
+        for i in self.occupied_slots() {
+            let wait = (self.base_scheduler.tick as u32).saturating_sub(self.last_execution_tick[i]);
+            total_wait = total_wait.saturating_add(wait);
+            wait_count += 1;
         }
-        
+
         self.stats.avg_wait_time = if wait_count > 0 {
             (total_wait as f32) / (wait_count as f32)
         } else {
@@ -366,14 +376,12 @@ impl AdaptiveScheduler {
         // Fairness index (Jain's fairness index)
         let mut sum_sq = 0.0;
         let mut sum = 0.0;
-        for i in 0..4 {
-            if self.base_scheduler.tasks[i].is_some() {
-                let time = (self.total_exec_time[i] as f32).max(1.0);
-                sum_sq += time * time;
-                sum += time;
-            }
+        for i in self.occupied_slots() {
+            let time = (self.total_exec_time[i] as f32).max(1.0);
+            sum_sq += time * time;
+            sum += time;
         }
-        
+
         if sum > 0.0 {
             self.stats.fairness_index = (sum * sum) / (wait_count as f32 * sum_sq).max(1.0);
         }
@@ -385,8 +393,8 @@ impl AdaptiveScheduler {
     }
 
     pub fn set_task_deadline(&mut self, task_id: usize, ticks: u32) {
-        if task_id > 0 && task_id <= 4 {
-            self.task_deadlines[task_id - 1] = ticks;
+        if let Some(idx) = task_index(task_id) {
+            self.task_deadlines[idx] = ticks;
         }
     }
 }

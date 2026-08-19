@@ -60,6 +60,21 @@ impl TaskMetrics {
         }
     }
 
+    /// Метрики задачи, наблюдаемые планировщиком в момент переключения
+    pub fn with_timing(
+        task_id: usize,
+        execution_time: u32,
+        wait_time: u32,
+        context_switches: u32,
+    ) -> Self {
+        let mut metrics = Self::new(task_id);
+        metrics.execution_time = execution_time;
+        metrics.wait_time = wait_time;
+        metrics.ticks_since_run = wait_time;
+        metrics.context_switches = context_switches;
+        metrics
+    }
+
     pub fn update_ema(&mut self, new_exec_time: u32) {
         let alpha = 0.3;  // вес недавних значений
         self.ema_exec_time = alpha * (new_exec_time as f32) 

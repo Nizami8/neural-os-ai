@@ -69,6 +69,28 @@ fn print_float(f: f32, decimals: usize) {
     print_number(frac);
 }
 
+fn print_labeled_number(label: &str, value: usize, suffix: &str) {
+    puts(label);
+    print_number(value);
+    puts(suffix);
+}
+
+fn print_labeled_float(label: &str, value: f32, suffix: &str) {
+    puts(label);
+    print_float(value, 2);
+    puts(suffix);
+}
+
+/// Выводит count весов через запятую
+fn print_weights(weights: &[f32], count: usize) {
+    for i in 0..count {
+        if i > 0 {
+            puts(", ");
+        }
+        print_float(weights[i], 2);
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     let mut i = 0;
@@ -97,46 +119,35 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 
 // ====== ЗАДАЧИ ======
 
-fn task1() {
+/// Бесконечная задача: печатает свой счетчик и жжет busy_cycles тактов
+fn counter_task(id: usize, class_tag: &str, busy_cycles: usize) -> ! {
     let mut counter = 0u64;
     loop {
-        puts("[T1:");
+        puts("[T");
+        print_number(id);
+        putc(b':');
         print_number(counter as usize);
-        puts("|RT] ");
-        counter += 1;
+        putc(b'|');
+        puts(class_tag);
+        puts("] ");
+        counter = counter.wrapping_add(1);
 
-        for _ in 0..50 {
+        for _ in 0..busy_cycles {
             unsafe { core::arch::asm!("nop"); }
         }
     }
+}
+
+fn task1() {
+    counter_task(1, "RT", 50)
 }
 
 fn task2() {
-    let mut counter = 0u64;
-    loop {
-        puts("[T2:");
-        print_number(counter as usize);
-        puts("|IO] ");
-        counter += 1;
-
-        for _ in 0..75 {
-            unsafe { core::arch::asm!("nop"); }
-        }
-    }
+    counter_task(2, "IO", 75)
 }
 
 fn task3() {
-    let mut counter = 0u64;
-    loop {
-        puts("[T3:");
-        print_number(counter as usize);
-        puts("|BG] ");
-        counter += 1;
-
-        for _ in 0..100 {
-            unsafe { core::arch::asm!("nop"); }
-        }
-    }
+    counter_task(3, "BG", 100)
 }
 
 // ====== ГЛАВНАЯ ФУНКЦИЯ ======
@@ -176,10 +187,7 @@ pub extern "C" fn rust_main() -> ! {
         
         puts("   Output weights: ");
         let weights = adaptive.get_neural_weights();
-        for i in 0..4 {
-            print_float(weights[i], 2);
-            if i < 3 { puts(", "); }
-        }
+        print_weights(&weights, 4);
         puts("\n");
 
         puts("⏱️  Setting task deadlines...\n");
@@ -214,25 +222,20 @@ pub extern "C" fn rust_main() -> ! {
                     
                     puts("\n");
                     puts("📊 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ STATISTICS ━━━━━━━━\n");
-                    puts("   Context Switches: ");
-                    print_number(adaptive.stats.total_context_switches as usize);
-                    puts("\n");
-                    
-                    puts("   Avg Wait Time: ");
-                    print_float(adaptive.stats.avg_wait_time, 2);
-                    puts(" ticks\n");
-                    
-                    puts("   Fairness Index: ");
-                    print_float(adaptive.stats.fairness_index, 2);
-                    puts(" (1.0 = perfect)\n");
-                    
+                    print_labeled_number(
+                        "   Context Switches: ",
+                        adaptive.stats.total_context_switches as usize,
+                        "\n",
+                    );
+                    print_labeled_float("   Avg Wait Time: ", adaptive.stats.avg_wait_time, " ticks\n");
+                    print_labeled_float(
+                        "   Fairness Index: ",
+                        adaptive.stats.fairness_index,
+                        " (1.0 = perfect)\n",
+                    );
+
                     puts("   Neural Output Weights: ");
-                    let w = adaptive.get_neural_weights();
-                    for i in 0..3 {
-                        print_float(w[i], 2);
-                        puts(", ");
-                    }
-                    print_float(w[3], 2);
+                    print_weights(&adaptive.get_neural_weights(), 4);
                     puts("\n");
                     
                     puts("────────────────────────────────────────────────────────\n\n");

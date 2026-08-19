@@ -1,17 +1,10 @@
 #!/bin/bash
 
-echo "🚀 Milk-V Duo 256M Setup Script for Neural OS"
-echo "============================================"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/common.sh"
 
-# Проверяем ОС
-if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    OS="linux"
-elif [[ "$OSTYPE" == "darwin"* ]]; then
-    OS="macos"
-else
-    echo "❌ Неподдерживаемая ОС. Нужен Linux или macOS"
-    exit 1
-fi
+banner "🚀 Milk-V Duo 256M Setup Script for Neural OS"
+
+OS=$(detect_os) || die "Неподдерживаемая ОС. Нужен Linux или macOS"
 
 echo "📦 Step 1: Installing system dependencies..."
 
@@ -29,7 +22,7 @@ elif [ "$OS" = "macos" ]; then
     brew install git python3 wget dtc mtools parted
 fi
 
-echo "✅ System dependencies installed"
+ok "System dependencies installed"
 
 echo ""
 echo "📥 Step 2: Downloading Milk-V Duo Buildroot SDK..."
@@ -39,35 +32,35 @@ mkdir -p ~/milkv-workspace
 cd ~/milkv-workspace
 
 if [ ! -d "duo-buildroot-sdk" ]; then
-    echo "  → Cloning buildroot SDK..."
+    step "Cloning buildroot SDK..."
     git clone https://github.com/milkv-duo/duo-buildroot-sdk.git
     cd duo-buildroot-sdk
 else
-    echo "  → SDK already exists, updating..."
+    step "SDK already exists, updating..."
     cd duo-buildroot-sdk
     git pull origin master
 fi
 
-echo "✅ SDK ready at ~/milkv-workspace/duo-buildroot-sdk"
+ok "SDK ready at ~/milkv-workspace/duo-buildroot-sdk"
 
 echo ""
 echo "🔧 Step 3: Installing Rust & RISC-V toolchain..."
 
 # Установляем Rust
-if ! command -v rustc &> /dev/null; then
-    echo "  → Installing Rust..."
+if ! have_cmd rustc; then
+    step "Installing Rust..."
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     source "$HOME/.cargo/env"
 else
-    echo "  → Rust already installed"
+    step "Rust already installed"
 fi
 
 # Добавляем RISC-V target
-rustup target add riscv64gc-unknown-linux-gnu
+rustup target add "$MILKV_TARGET"
 
 # Проверяем GCC
-if ! command -v riscv64-unknown-elf-gcc &> /dev/null; then
-    echo "  → Downloading RISC-V GCC toolchain..."
+if ! have_cmd riscv64-unknown-elf-gcc; then
+    step "Downloading RISC-V GCC toolchain..."
     
     # Скачиваем prebuilt toolchain
     if [ "$OS" = "linux" ]; then
@@ -84,7 +77,7 @@ if ! command -v riscv64-unknown-elf-gcc &> /dev/null; then
     rm "$TOOLCHAIN_FILE"
 fi
 
-echo "✅ Rust & RISC-V toolchain ready"
+ok "Rust & RISC-V toolchain ready"
 
 echo ""
 echo "📋 Step 4: Setting up environment variables..."
@@ -109,16 +102,16 @@ export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=riscv64-unknown-linux-gnu
 echo "✅ Milk-V Duo environment loaded"
 EOF
 
-echo "  → Created ~/.milkv-env"
-echo "  → Add to ~/.bashrc: source ~/.milkv-env"
+step "Created ~/.milkv-env"
+step "Add to ~/.bashrc: source ~/.milkv-env"
 
 echo ""
-echo "============================================"
-echo "✅ Setup Complete!"
+separator
+ok "Setup Complete!"
 echo ""
 echo "Next steps:"
 echo "  1. source ~/.milkv-env"
 echo "  2. Clone your Neural OS repo"
-echo "  3. cargo build --target riscv64gc-unknown-linux-gnu"
+echo "  3. cargo build --target $MILKV_TARGET"
 echo "  4. Follow flashing guide"
 echo ""
