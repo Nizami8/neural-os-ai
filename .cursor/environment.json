@@ -1,0 +1,5 @@
+{
+  "name": "Neural OS (RISC-V) dev environment",
+  "user": "ubuntu",
+  "install": "bash .cursor/install.sh"
+}
