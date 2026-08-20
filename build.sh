@@ -4,7 +4,7 @@ set -euo pipefail
 echo "🔨 Building Neural OS v1.0-alpha (Stage 4 IPC kernel)..."
 
 TARGET=riscv64gc-unknown-none-elf
-cargo build --release --target "$TARGET" --bin kernel
+cargo build --release --target "$TARGET" --bin kernel --features kernel
 
 ELF="target/${TARGET}/release/kernel"
 if [[ ! -f "$ELF" ]]; then

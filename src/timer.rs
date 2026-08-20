@@ -1,16 +1,17 @@
+#[cfg(target_os = "none")]
 use crate::config::{CLINT_MTIME, CLINT_MTIMECMP, TIMER_INTERVAL};
 
-#[cfg(not(any(test, feature = "std")))]
+#[cfg(target_os = "none")]
 pub fn read_mtime() -> u64 {
     unsafe { core::ptr::read_volatile(CLINT_MTIME as *const u64) }
 }
 
-#[cfg(not(any(test, feature = "std")))]
+#[cfg(target_os = "none")]
 pub fn set_mtimecmp(value: u64) {
     unsafe { core::ptr::write_volatile(CLINT_MTIMECMP as *mut u64, value) }
 }
 
-#[cfg(not(any(test, feature = "std")))]
+#[cfg(target_os = "none")]
 pub fn init() {
     set_mtimecmp(read_mtime().wrapping_add(TIMER_INTERVAL));
     unsafe {
@@ -23,13 +24,13 @@ pub fn init() {
     }
 }
 
-#[cfg(not(any(test, feature = "std")))]
+#[cfg(target_os = "none")]
 pub fn ack() {
     set_mtimecmp(read_mtime().wrapping_add(TIMER_INTERVAL));
 }
 
-#[cfg(any(test, feature = "std"))]
+#[cfg(not(target_os = "none"))]
 pub fn init() {}
 
-#[cfg(any(test, feature = "std"))]
+#[cfg(not(target_os = "none"))]
 pub fn ack() {}

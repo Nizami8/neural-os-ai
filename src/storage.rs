@@ -2,12 +2,12 @@
 /// Saves/loads learned weights across system restarts.
 
 pub struct PersistentStorage {
-    pub buffer: [u32; 32],
+    pub buffer: [u32; 64],
 }
 
 impl PersistentStorage {
     pub fn new() -> Self {
-        PersistentStorage { buffer: [0; 32] }
+        PersistentStorage { buffer: [0; 64] }
     }
 
     pub fn save_weights(&mut self, weights: &[[f32; 7]; 8], output_weights: &[f32; 8]) {
@@ -15,18 +15,14 @@ impl PersistentStorage {
 
         for row in weights.iter() {
             for value in row.iter() {
-                if idx < 32 {
-                    self.buffer[idx] = value.to_bits();
-                    idx += 1;
-                }
+                self.buffer[idx] = value.to_bits();
+                idx += 1;
             }
         }
 
         for value in output_weights.iter() {
-            if idx < 32 {
-                self.buffer[idx] = value.to_bits();
-                idx += 1;
-            }
+            self.buffer[idx] = value.to_bits();
+            idx += 1;
         }
     }
 
@@ -41,25 +37,21 @@ impl PersistentStorage {
 
         for row in weights.iter_mut() {
             for value in row.iter_mut() {
-                if idx < 32 {
-                    *value = f32::from_bits(self.buffer[idx]);
-                    idx += 1;
-                }
+                *value = f32::from_bits(self.buffer[idx]);
+                idx += 1;
             }
         }
 
         for value in output.iter_mut() {
-            if idx < 32 {
-                *value = f32::from_bits(self.buffer[idx]);
-                idx += 1;
-            }
+            *value = f32::from_bits(self.buffer[idx]);
+            idx += 1;
         }
 
         Some((weights, output))
     }
 
     pub fn clear(&mut self) {
-        self.buffer = [0; 32];
+        self.buffer = [0; 64];
     }
 }
 

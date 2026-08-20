@@ -34,7 +34,7 @@ impl ObjectType {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Capability {
     pub object_type: ObjectType,
     pub object_id: u16,

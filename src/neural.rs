@@ -3,6 +3,7 @@
 
 const HIDDEN_SIZE: usize = 8;
 const INPUT_SIZE: usize = 7;  // расширенные метрики
+#[allow(dead_code)]
 const OUTPUT_SIZE: usize = 1;
 
 pub struct NeuralScheduler {
@@ -161,7 +162,7 @@ impl NeuralScheduler {
         let output_error = target - output;
         
         // Если ошибка слишком мала, не обновляем
-        if output_error.abs() < 0.001 {
+        if f32_abs(output_error) < 0.001 {
             return;
         }
 
@@ -200,6 +201,15 @@ impl NeuralScheduler {
     /// Сбросить веса на начальные значения
     pub fn reset(&mut self) {
         *self = Self::new();
+    }
+}
+
+#[inline]
+fn f32_abs(x: f32) -> f32 {
+    if x < 0.0 {
+        -x
+    } else {
+        x
     }
 }
 

@@ -9,8 +9,9 @@ const CAUSE_ECALL_S: usize = 9;
 #[no_mangle]
 pub extern "C" fn rust_trap_handler(tf: *mut TrapFrame) -> *mut TrapFrame {
     unsafe {
-        let tf = &mut *tf;
+        #[allow(static_mut_refs)]
         let k = &mut crate::kernel::KERNEL;
+        let tf = &mut *tf;
         let mcause = tf.mcause;
 
         if mcause & MCAUSE_INT != 0 {
@@ -46,12 +47,12 @@ pub extern "C" fn rust_trap_handler(tf: *mut TrapFrame) -> *mut TrapFrame {
     }
 }
 
-#[cfg(not(any(test, feature = "std")))]
+#[cfg(target_os = "none")]
 extern "C" {
     pub fn trap_return(tf: *mut TrapFrame) -> !;
 }
 
-#[cfg(any(test, feature = "std"))]
+#[cfg(not(target_os = "none"))]
 pub unsafe fn trap_return(_tf: *mut TrapFrame) -> ! {
     loop {}
 }

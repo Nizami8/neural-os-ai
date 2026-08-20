@@ -113,8 +113,12 @@ fn denied_thread() -> ! {
     // Only RIGHT_RECV was granted; send must be rejected.
     let st = sys_send(1, 99, 0, 0);
     sys_print("[denied] send status=");
-    console::write_usize(st);
-    sys_print(" (expect denied)\n");
+    if st == neural_os::syscall::ERR_DENIED {
+        sys_print("DENIED\n");
+    } else {
+        console::write_usize(st);
+        sys_print("\n");
+    }
     loop {
         sys_yield();
         unsafe { core::arch::asm!("wfi") }
@@ -124,15 +128,16 @@ fn denied_thread() -> ! {
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
     console::write_str("\n");
-    console::write_str("╔═══════════════════════════════════════════════════════════╗\n");
-    console::write_str("║  Neural OS v1.0-alpha  Stage 4: IPC + Capabilities      ║\n");
-    console::write_str("║  • TrapFrame context switch + preemptive RR             ║\n");
-    console::write_str("║  • Process/Thread + syscalls                            ║\n");
-    console::write_str("║  • Endpoint rendezvous (blocking send/recv)             ║\n");
-    console::write_str("║  • Capability rights + generation checks                ║\n");
-    console::write_str("╚═══════════════════════════════════════════════════════════╝\n\n");
+    console::write_str("===========================================================\n");
+    console::write_str(" Neural OS v1.0-alpha  Stage 4: IPC + Capabilities\n");
+    console::write_str("  * TrapFrame context switch + preemptive RR\n");
+    console::write_str("  * Process/Thread + syscalls\n");
+    console::write_str("  * Endpoint rendezvous (blocking send/recv)\n");
+    console::write_str("  * Capability rights + generation checks\n");
+    console::write_str("===========================================================\n\n");
 
     unsafe {
+        #[allow(static_mut_refs)]
         let k = &mut KERNEL;
 
         let (_idle_pid, idle_tid) = k

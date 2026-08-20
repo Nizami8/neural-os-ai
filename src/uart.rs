@@ -1,7 +1,7 @@
-#[cfg(not(any(test, feature = "std")))]
+#[cfg(target_os = "none")]
 use crate::config::UART_BASE;
 
-#[cfg(not(any(test, feature = "std")))]
+#[cfg(target_os = "none")]
 pub fn putc(c: u8) {
     unsafe {
         let lsr = (UART_BASE + 5) as *const u8;
@@ -15,7 +15,7 @@ pub fn putc(c: u8) {
     }
 }
 
-#[cfg(any(test, feature = "std"))]
+#[cfg(not(target_os = "none"))]
 pub fn putc(c: u8) {
     let _ = c;
 }

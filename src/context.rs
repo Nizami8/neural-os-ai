@@ -64,12 +64,12 @@ impl ExecutionContext {
     }
 }
 
-#[cfg(not(any(test, feature = "std")))]
+#[cfg(target_os = "none")]
 extern "C" {
     pub fn context_switch(old: *mut Context, new: *const Context);
 }
 
-#[cfg(any(test, feature = "std"))]
+#[cfg(not(target_os = "none"))]
 pub unsafe fn context_switch(_old: *mut Context, _new: *const Context) {}
 
 const _: () = {

@@ -4,6 +4,8 @@ use crate::config::MAX_THREADS;
 use crate::cpu::Cpu;
 use crate::thread::{Thread, ThreadId, ThreadState, ThreadTable};
 
+pub use crate::thread::ThreadState as TaskState;
+
 pub struct Scheduler {
     pub current: ThreadId,
     pub tick: u64,

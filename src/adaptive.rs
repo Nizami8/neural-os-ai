@@ -57,7 +57,7 @@ impl MetricsCollector {
                 task_id,
                 execution_time: avg_exec / count,
                 wait_time: avg_wait / count,
-                memory_used: avg_mem / count,
+                memory_used: avg_mem / count as usize,
                 ticks_since_run: avg_ticks / count,
                 io_wait_count: avg_io / count,
                 context_switches: avg_ctx / count,
@@ -212,7 +212,7 @@ impl AdaptiveScheduler {
             .count();
         
         let current_task = &self.base_scheduler.tasks[current_idx];
-        if let Some(task) = current_task {
+        if let Some(_task) = current_task {
             let exec_time = self.execution_start_time[current_idx];
             
             // Преемптить если:
@@ -305,18 +305,24 @@ impl AdaptiveScheduler {
 
         // Переключаемся на выбранную задачу
         if next_idx != self.base_scheduler.current {
-            if let (Some(old_task), Some(new_task)) = (
-                self.base_scheduler.tasks[self.base_scheduler.current].as_mut(),
-                self.base_scheduler.tasks[next_idx].as_mut(),
-            ) {
-                // Обновляем статистику
-                let exec_time = current_tick.saturating_sub(self.execution_start_time[self.base_scheduler.current]);
-                self.total_exec_time[self.base_scheduler.current] = self.total_exec_time[self.base_scheduler.current].saturating_add(exec_time);
-                
-                old_task.state = TaskState::Ready;
-                new_task.state = TaskState::Running;
+            let current = self.base_scheduler.current;
+            if self.base_scheduler.tasks[current].is_some()
+                && self.base_scheduler.tasks[next_idx].is_some()
+            {
+                let exec_time =
+                    current_tick.saturating_sub(self.execution_start_time[current]);
+                self.total_exec_time[current] =
+                    self.total_exec_time[current].saturating_add(exec_time);
 
-                let mut metrics = TaskMetrics::new(new_task.id);
+                let new_id = self.base_scheduler.tasks[next_idx].as_ref().unwrap().id;
+                if let Some(old_task) = self.base_scheduler.tasks[current].as_mut() {
+                    old_task.state = TaskState::Ready;
+                }
+                if let Some(new_task) = self.base_scheduler.tasks[next_idx].as_mut() {
+                    new_task.state = TaskState::Running;
+                }
+
+                let mut metrics = TaskMetrics::new(new_id);
                 metrics.execution_time = exec_time;
                 metrics.wait_time = current_tick.saturating_sub(self.last_execution_tick[next_idx]);
                 metrics.ticks_since_run = metrics.wait_time;
@@ -326,7 +332,6 @@ impl AdaptiveScheduler {
                 self.last_execution_tick[next_idx] = current_tick;
                 self.execution_start_time[next_idx] = current_tick;
 
-                // Online learning
                 let target = if metrics.wait_time > 50 { 1.0 } else { 0.7 };
                 self.neural.learn(&metrics, target);
 
@@ -334,8 +339,24 @@ impl AdaptiveScheduler {
                 self.stats.total_context_switches += 1;
                 self.stats.total_preemptions += 1;
 
+                let (old_ctx, new_ctx) = {
+                    let tasks = &mut self.base_scheduler.tasks;
+                    if current < next_idx {
+                        let (left, right) = tasks.split_at_mut(next_idx);
+                        (
+                            &mut left[current].as_mut().unwrap().context,
+                            &mut right[0].as_mut().unwrap().context,
+                        )
+                    } else {
+                        let (left, right) = tasks.split_at_mut(current);
+                        (
+                            &mut right[0].as_mut().unwrap().context,
+                            &mut left[next_idx].as_mut().unwrap().context,
+                        )
+                    }
+                };
                 unsafe {
-                    crate::scheduler::context_switch(&mut old_task.context, &mut new_task.context);
+                    crate::scheduler::context_switch(old_ctx, new_ctx);
                 }
             }
         }
