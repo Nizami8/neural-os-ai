@@ -35,4 +35,8 @@ check "STATISTICS"              "no statistics block"
 # i.e. the task resumed after being switched out and back in.
 check "\[T1:[5-9][0-9]\|RT\]"   "no evidence of preemptive resume (T1 < 50)"
 
-echo "PASS: kernel boots, T1/T2/T3 preempt round-robin, statistics printed."
+# Syscalls (Stage 3): SYS_GETPID + SYS_PRINT + SYS_EXIT.
+check "\[SYSCALL\] T4 started via ecall, pid=4" "SYS_GETPID/SYS_PRINT not working"
+check "T4 calling SYS_EXIT"                      "SYS_EXIT not reached"
+
+echo "PASS: kernel boots, T1/T2/T3 preempt round-robin, statistics printed, syscalls work."

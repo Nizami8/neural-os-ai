@@ -4,6 +4,7 @@
 mod scheduler;
 mod trapframe;
 mod trap;
+mod syscall;
 mod neural;
 mod adaptive;
 mod storage;
@@ -140,6 +141,31 @@ fn task3() {
     }
 }
 
+// Stage 3 demo task: interacts with the kernel purely through system calls
+// (ecall), then terminates itself with SYS_EXIT to show the scheduler retiring
+// a task while the others keep running.
+fn task4_syscalls() {
+    let pid = syscall::sys_getpid();
+    syscall::sys_print("\n[SYSCALL] T4 started via ecall, pid=");
+    syscall::sys_print_usize(pid);
+    syscall::sys_print("\n");
+
+    let mut n = 0u64;
+    loop {
+        syscall::sys_print("{T4:SYS_PRINT} ");
+        n += 1;
+        if n >= 5 {
+            syscall::sys_print("\n[SYSCALL] T4 calling SYS_EXIT\n");
+            syscall::sys_exit();
+        }
+        // Give up the CPU cooperatively, then burn a little time.
+        syscall::sys_yield();
+        for _ in 0..2_000_000 {
+            unsafe { core::arch::asm!("nop"); }
+        }
+    }
+}
+
 // ====== ГЛАВНАЯ ФУНКЦИЯ ======
 
 #[no_mangle]
@@ -164,9 +190,10 @@ pub extern "C" fn rust_main() -> ! {
         puts("📊 Initializing advanced scheduler...\n");
         
         // Добавляем задачи с классами
-        adaptive.add_task(1, task1, TaskClass::RealTime);      // жесткие deadline'ы
-        adaptive.add_task(2, task2, TaskClass::Interactive);   // низкий latency
-        adaptive.add_task(3, task3, TaskClass::Batch);         // фоновая работа
+        adaptive.add_task(1, task1, TaskClass::RealTime);        // жесткие deadline'ы
+        adaptive.add_task(2, task2, TaskClass::Interactive);     // низкий latency
+        adaptive.add_task(3, task3, TaskClass::Batch);           // фоновая работа
+        adaptive.add_task(4, task4_syscalls, TaskClass::Batch);  // демо системных вызовов
 
         puts("🧠 Neural network initialized (MLP 7→8→1)\n");
         puts("   Architecture: Input(7) → Hidden(8, ReLU) → Output(1, Sigmoid)\n");
