@@ -33,13 +33,27 @@ if [ "${apt_ok}" -ne 1 ]; then
 fi
 
 echo "==> Installing Rust nightly (needed for -Z build-std) with rust-src"
-rustup toolchain install nightly --profile minimal --component rust-src
+# Overlay/container filesystems can fail rustup's rename during channel upgrades
+# (EXDEV / "Invalid cross-device link"). Keep a working nightly when upgrade fails.
+if ! rustup toolchain install nightly --profile minimal --component rust-src; then
+  if rustc +nightly -vV >/dev/null 2>&1; then
+    echo "WARN: nightly upgrade failed; keeping existing nightly toolchain"
+    rustup component add --toolchain nightly rust-src || true
+  else
+    echo "ERROR: failed to install Rust nightly" >&2
+    exit 1
+  fi
+fi
 
 echo "==> Adding RISC-V targets to the default toolchain and nightly"
 # Default toolchain: used by build.sh's bare `rustc`.
 rustup target add riscv64gc-unknown-none-elf riscv64gc-unknown-linux-gnu
 # Nightly: used by build-milkv.sh (`-Z build-std`).
-rustup target add --toolchain nightly riscv64gc-unknown-none-elf riscv64gc-unknown-linux-gnu
+rustup target add --toolchain nightly riscv64gc-unknown-none-elf riscv64gc-unknown-linux-gnu || true
+if ! rustup +nightly target list --installed 2>/dev/null | grep -q 'riscv64gc-unknown-none-elf'; then
+  echo "ERROR: nightly missing riscv64gc-unknown-none-elf target" >&2
+  exit 1
+fi
 
 echo "==> Providing the linker name expected by .cargo/config.toml"
 # .cargo/config.toml sets linker = "riscv64-unknown-linux-gnu-gcc";
