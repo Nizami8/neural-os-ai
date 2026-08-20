@@ -3,6 +3,7 @@ use core::sync::atomic::Ordering;
 use crate::trapframe::TrapFrame;
 use crate::scheduler::{TaskState, MAX_TASKS};
 use crate::syscall;
+use crate::ipc;
 use crate::ADAPTIVE_SCHED;
 use crate::USE_AI;
 
@@ -119,27 +120,25 @@ unsafe fn handle_syscall() {
                 i += 1;
             }
         }
-        syscall::SYS_YIELD => switch_away(false),
-        syscall::SYS_EXIT => switch_away(true),
+        syscall::SYS_YIELD => reschedule(TaskState::Ready),
+        syscall::SYS_EXIT => reschedule(TaskState::Terminated),
+        syscall::SYS_SEND => ipc_send(arg0, arg1),
+        syscall::SYS_RECV => ipc_recv(arg0),
         _ => {}
     }
 }
 
-/// Switch the CPU away from the current task. If `terminate`, the current task
-/// is marked terminated and will never be scheduled again; otherwise it stays
-/// runnable (a yield). Picks the next Ready task round-robin.
-unsafe fn switch_away(terminate: bool) {
+/// Move the current task to `new_state` and switch to the next Ready task
+/// (round-robin). Used by yield (Ready), exit (Terminated) and blocking IPC
+/// (Blocked). Relies on at least one task always being runnable.
+unsafe fn reschedule(new_state: TaskState) {
     let a = match ADAPTIVE_SCHED {
         Some(ref mut a) => a,
         None => return,
     };
     let cur = a.base_scheduler.current;
     if let Some(t) = a.base_scheduler.tasks[cur].as_mut() {
-        t.state = if terminate {
-            TaskState::Terminated
-        } else {
-            TaskState::Ready
-        };
+        t.state = new_state;
     }
 
     // Find the next runnable task (round-robin).
@@ -159,11 +158,67 @@ unsafe fn switch_away(terminate: bool) {
         a.base_scheduler.tasks[idx].as_mut().unwrap().state = TaskState::Running;
         a.base_scheduler.current = idx;
         CURRENT_TF = &mut a.base_scheduler.tasks[idx].as_mut().unwrap().tf as *mut TrapFrame;
-    } else if !terminate {
-        // Nothing else to run: keep running the current task.
+    } else if new_state == TaskState::Ready {
+        // Yield with nothing else to run: keep running the current task.
         if let Some(t) = a.base_scheduler.tasks[cur].as_mut() {
             t.state = TaskState::Running;
         }
+    }
+}
+
+/// SYS_SEND: rendezvous send of a one-word message on `epid`.
+unsafe fn ipc_send(epid: usize, msg: usize) {
+    if epid >= ipc::NUM_ENDPOINTS {
+        return;
+    }
+    if let Some(recv_idx) = ipc::ENDPOINTS[epid].receiver.take() {
+        // A receiver was waiting: deliver directly and wake it.
+        if let Some(a) = ADAPTIVE_SCHED.as_mut() {
+            if let Some(rt) = a.base_scheduler.tasks[recv_idx].as_mut() {
+                rt.tf.regs[10] = msg; // recv() returns the message
+                rt.state = TaskState::Ready;
+            }
+            let cur = a.base_scheduler.current;
+            if let Some(st) = a.base_scheduler.tasks[cur].as_mut() {
+                st.tf.regs[10] = 0; // send() returns success; sender continues
+            }
+        }
+    } else {
+        // No receiver yet: park this sender until one arrives.
+        let cur = ADAPTIVE_SCHED
+            .as_ref()
+            .map(|a| a.base_scheduler.current)
+            .unwrap_or(0);
+        ipc::ENDPOINTS[epid].sender = Some((cur, msg));
+        reschedule(TaskState::Blocked);
+    }
+}
+
+/// SYS_RECV: rendezvous receive of a one-word message from `epid`.
+unsafe fn ipc_recv(epid: usize) {
+    if epid >= ipc::NUM_ENDPOINTS {
+        return;
+    }
+    if let Some((send_idx, msg)) = ipc::ENDPOINTS[epid].sender.take() {
+        // A sender was waiting: take its message and wake it.
+        if let Some(a) = ADAPTIVE_SCHED.as_mut() {
+            if let Some(stk) = a.base_scheduler.tasks[send_idx].as_mut() {
+                stk.tf.regs[10] = 0; // send() returns success
+                stk.state = TaskState::Ready;
+            }
+            let cur = a.base_scheduler.current;
+            if let Some(rt) = a.base_scheduler.tasks[cur].as_mut() {
+                rt.tf.regs[10] = msg; // recv() returns the message; receiver continues
+            }
+        }
+    } else {
+        // No sender yet: park this receiver until one arrives.
+        let cur = ADAPTIVE_SCHED
+            .as_ref()
+            .map(|a| a.base_scheduler.current)
+            .unwrap_or(0);
+        ipc::ENDPOINTS[epid].receiver = Some(cur);
+        reschedule(TaskState::Blocked);
     }
 }
 

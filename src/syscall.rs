@@ -12,6 +12,8 @@ pub const SYS_YIELD: usize = 0;
 pub const SYS_GETPID: usize = 1;
 pub const SYS_PRINT: usize = 2;
 pub const SYS_EXIT: usize = 3;
+pub const SYS_SEND: usize = 4;
+pub const SYS_RECV: usize = 5;
 
 /// Return the current task's id.
 pub fn sys_getpid() -> usize {
@@ -68,4 +70,29 @@ pub fn sys_exit() -> ! {
         asm!("ecall", in("a7") SYS_EXIT);
     }
     loop {}
+}
+
+/// Send a one-word message on an endpoint (blocks until a receiver takes it).
+pub fn sys_send(endpoint: usize, msg: usize) {
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") SYS_SEND,
+            inout("a0") endpoint => _,
+            in("a1") msg,
+        );
+    }
+}
+
+/// Receive a one-word message from an endpoint (blocks until a sender arrives).
+pub fn sys_recv(endpoint: usize) -> usize {
+    let msg: usize;
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") SYS_RECV,
+            inout("a0") endpoint => msg,
+        );
+    }
+    msg
 }

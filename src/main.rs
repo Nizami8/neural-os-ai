@@ -5,6 +5,7 @@ mod scheduler;
 mod trapframe;
 mod trap;
 mod syscall;
+mod ipc;
 mod neural;
 mod adaptive;
 mod storage;
@@ -166,6 +167,33 @@ fn task4_syscalls() {
     }
 }
 
+// Stage 4 demo: two tasks rendezvous over an IPC endpoint. The producer sends a
+// counter, the consumer blocks on recv until it arrives, prints it, and loops.
+const DEMO_ENDPOINT: usize = 0;
+
+fn task5_ipc_producer() {
+    let mut value = 0usize;
+    loop {
+        syscall::sys_send(DEMO_ENDPOINT, value);
+        syscall::sys_print("(T5 sent ");
+        syscall::sys_print_usize(value);
+        syscall::sys_print(") ");
+        value += 1;
+        for _ in 0..3_000_000 {
+            unsafe { core::arch::asm!("nop"); }
+        }
+    }
+}
+
+fn task6_ipc_consumer() {
+    loop {
+        let got = syscall::sys_recv(DEMO_ENDPOINT);
+        syscall::sys_print("(T6 got ");
+        syscall::sys_print_usize(got);
+        syscall::sys_print(") ");
+    }
+}
+
 // ====== ГЛАВНАЯ ФУНКЦИЯ ======
 
 #[no_mangle]
@@ -190,10 +218,12 @@ pub extern "C" fn rust_main() -> ! {
         puts("📊 Initializing advanced scheduler...\n");
         
         // Добавляем задачи с классами
-        adaptive.add_task(1, task1, TaskClass::RealTime);        // жесткие deadline'ы
-        adaptive.add_task(2, task2, TaskClass::Interactive);     // низкий latency
-        adaptive.add_task(3, task3, TaskClass::Batch);           // фоновая работа
-        adaptive.add_task(4, task4_syscalls, TaskClass::Batch);  // демо системных вызовов
+        adaptive.add_task(1, task1, TaskClass::RealTime);            // жесткие deadline'ы
+        adaptive.add_task(2, task2, TaskClass::Interactive);         // низкий latency
+        adaptive.add_task(3, task3, TaskClass::Batch);               // фоновая работа
+        adaptive.add_task(4, task4_syscalls, TaskClass::Batch);      // демо системных вызовов
+        adaptive.add_task(5, task5_ipc_producer, TaskClass::Batch);  // IPC producer
+        adaptive.add_task(6, task6_ipc_consumer, TaskClass::Batch);  // IPC consumer
 
         puts("🧠 Neural network initialized (MLP 7→8→1)\n");
         puts("   Architecture: Input(7) → Hidden(8, ReLU) → Output(1, Sigmoid)\n");

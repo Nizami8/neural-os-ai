@@ -39,4 +39,8 @@ check "\[T1:[5-9][0-9]\|RT\]"   "no evidence of preemptive resume (T1 < 50)"
 check "\[SYSCALL\] T4 started via ecall, pid=4" "SYS_GETPID/SYS_PRINT not working"
 check "T4 calling SYS_EXIT"                      "SYS_EXIT not reached"
 
-echo "PASS: kernel boots, T1/T2/T3 preempt round-robin, statistics printed, syscalls work."
+# IPC (Stage 4): blocking send/recv rendezvous between T5 and T6.
+check "\(T5 sent 0\)"  "IPC SYS_SEND not working"
+check "\(T6 got 5\)"   "IPC SYS_RECV/rendezvous not working"
+
+echo "PASS: boot + preemption + statistics + syscalls + IPC all working."
