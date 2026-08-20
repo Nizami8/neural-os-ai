@@ -90,16 +90,6 @@ pub unsafe extern "C" fn memset(s: *mut u8, c: i32, n: usize) -> *mut u8 {
     s
 }
 
-// f32 remainder (`%`) lowers to fmodf, which core does not provide on bare metal.
-#[no_mangle]
-pub extern "C" fn fmodf(x: f32, y: f32) -> f32 {
-    if y == 0.0 {
-        return f32::NAN;
-    }
-    let q = (x / y) as i32; // truncate toward zero
-    x - (q as f32) * y
-}
-
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     puts("PANIC!\n");

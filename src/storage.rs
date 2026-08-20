@@ -68,3 +68,47 @@ impl PersistentStorage {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_load_roundtrip() {
+        let mut s = PersistentStorage::new();
+
+        let mut w = [[0.0f32; 7]; 8];
+        for i in 0..8 {
+            for j in 0..7 {
+                w[i][j] = (i * 7 + j) as f32 * 0.01;
+            }
+        }
+        let out = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8f32];
+
+        s.save_weights(&w, &out);
+        let (loaded, _) = s.load_weights().expect("load_weights returned None");
+
+        // The buffer holds 32 slots, so only the first 32 flattened hidden
+        // weights survive the round trip; check those bit-for-bit.
+        for k in 0..32 {
+            let (i, j) = (k / 7, k % 7);
+            assert!(
+                (loaded[k] - w[i][j]).abs() < 1e-9,
+                "mismatch at {}: {} != {}",
+                k,
+                loaded[k],
+                w[i][j]
+            );
+        }
+    }
+
+    #[test]
+    fn clear_zeroes_buffer() {
+        let mut s = PersistentStorage::new();
+        let w = [[1.0f32; 7]; 8];
+        let out = [1.0f32; 8];
+        s.save_weights(&w, &out);
+        s.clear();
+        assert!(s.buffer.iter().all(|&x| x == 0));
+    }
+}
