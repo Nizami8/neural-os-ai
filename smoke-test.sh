@@ -42,5 +42,7 @@ check "T4 calling SYS_EXIT"                      "SYS_EXIT not reached"
 # IPC (Stage 4): blocking send/recv rendezvous between T5 and T6.
 check "\(T5 sent 0\)"  "IPC SYS_SEND not working"
 check "\(T6 got 5\)"   "IPC SYS_RECV/rendezvous not working"
+# Capability enforcement: T4 has no capability and must be denied.
+check "T4 SYS_SEND on ep0 DENIED" "IPC capability enforcement not working"
 
-echo "PASS: boot + preemption + statistics + syscalls + IPC all working."
+echo "PASS: boot + preemption + statistics + syscalls + IPC + capabilities all working."

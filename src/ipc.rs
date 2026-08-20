@@ -11,6 +11,15 @@
 
 pub const NUM_ENDPOINTS: usize = 4;
 
+// Capability rights a task may hold on an endpoint (seL4-style access control).
+pub const CAP_SEND: u8 = 1 << 0;
+pub const CAP_RECV: u8 = 1 << 1;
+
+// Return codes for send (recv returns the message, or RECV_DENIED on error).
+pub const OK: usize = 0;
+pub const EPERM: usize = 1;
+pub const RECV_DENIED: usize = usize::MAX;
+
 #[derive(Clone, Copy)]
 pub struct Endpoint {
     /// A blocked sender: (task index, message).

@@ -73,15 +73,19 @@ pub fn sys_exit() -> ! {
 }
 
 /// Send a one-word message on an endpoint (blocks until a receiver takes it).
-pub fn sys_send(endpoint: usize, msg: usize) {
+/// Returns 0 on success, or a non-zero error code (e.g. EPERM if the task lacks
+/// the SEND capability on this endpoint).
+pub fn sys_send(endpoint: usize, msg: usize) -> usize {
+    let rc: usize;
     unsafe {
         asm!(
             "ecall",
             in("a7") SYS_SEND,
-            inout("a0") endpoint => _,
+            inout("a0") endpoint => rc,
             in("a1") msg,
         );
     }
+    rc
 }
 
 /// Receive a one-word message from an endpoint (blocks until a sender arrives).

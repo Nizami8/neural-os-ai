@@ -144,6 +144,11 @@ impl AdaptiveScheduler {
         }
     }
 
+    /// Grant a task (by id) an IPC capability on an endpoint.
+    pub fn grant_cap(&mut self, id: usize, endpoint: usize, rights: u8) {
+        self.base_scheduler.grant(id, endpoint, rights);
+    }
+
     /// Load-balanced selection с fairness
     pub fn select_next_task_balanced(&mut self) -> usize {
         let current_tick = self.base_scheduler.tick as u32;

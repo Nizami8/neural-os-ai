@@ -151,6 +151,14 @@ fn task4_syscalls() {
     syscall::sys_print_usize(pid);
     syscall::sys_print("\n");
 
+    // T4 was granted no IPC capabilities, so this send must be denied.
+    let rc = syscall::sys_send(DEMO_ENDPOINT, 999);
+    if rc != 0 {
+        syscall::sys_print("[SYSCALL] T4 SYS_SEND on ep0 DENIED (no capability), rc=");
+        syscall::sys_print_usize(rc);
+        syscall::sys_print("\n");
+    }
+
     let mut n = 0u64;
     loop {
         syscall::sys_print("{T4:SYS_PRINT} ");
@@ -224,6 +232,10 @@ pub extern "C" fn rust_main() -> ! {
         adaptive.add_task(4, task4_syscalls, TaskClass::Batch);      // демо системных вызовов
         adaptive.add_task(5, task5_ipc_producer, TaskClass::Batch);  // IPC producer
         adaptive.add_task(6, task6_ipc_consumer, TaskClass::Batch);  // IPC consumer
+
+        // Capabilities: only T5 may send and only T6 may recv on the endpoint.
+        adaptive.grant_cap(5, DEMO_ENDPOINT, ipc::CAP_SEND);
+        adaptive.grant_cap(6, DEMO_ENDPOINT, ipc::CAP_RECV);
 
         puts("🧠 Neural network initialized (MLP 7→8→1)\n");
         puts("   Architecture: Input(7) → Hidden(8, ReLU) → Output(1, Sigmoid)\n");

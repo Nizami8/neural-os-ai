@@ -7,6 +7,7 @@
 /// those frames (see `trap.s` / `src/trap.rs`).
 
 use crate::trapframe::{TrapFrame, MSTATUS_INIT};
+use crate::ipc::NUM_ENDPOINTS;
 
 pub const MAX_TASKS: usize = 6;
 
@@ -58,6 +59,8 @@ pub struct Task {
     pub context: Context,
     /// Full saved register state; the timer trap vector switches through this.
     pub tf: TrapFrame,
+    /// Per-endpoint IPC capability rights (CAP_SEND | CAP_RECV).
+    pub caps: [u8; NUM_ENDPOINTS],
 }
 
 pub struct Scheduler {
@@ -97,8 +100,23 @@ impl Scheduler {
                     state,
                     context: Context::new(),
                     tf,
+                    caps: [0; NUM_ENDPOINTS],
                 });
                 return;
+            }
+        }
+    }
+
+    /// Grant a task (by id) capability `rights` on `endpoint`.
+    pub fn grant(&mut self, id: usize, endpoint: usize, rights: u8) {
+        if endpoint >= NUM_ENDPOINTS {
+            return;
+        }
+        for i in 0..MAX_TASKS {
+            if let Some(t) = self.tasks[i].as_mut() {
+                if t.id == id {
+                    t.caps[endpoint] |= rights;
+                }
             }
         }
     }

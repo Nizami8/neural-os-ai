@@ -166,9 +166,20 @@ unsafe fn reschedule(new_state: TaskState) {
     }
 }
 
+/// Does the current task hold `right` on endpoint `epid`?
+unsafe fn current_has_cap(epid: usize, right: u8) -> bool {
+    ADAPTIVE_SCHED.as_ref().map_or(false, |a| {
+        let cur = a.base_scheduler.current;
+        a.base_scheduler.tasks[cur]
+            .as_ref()
+            .map_or(false, |t| t.caps[epid] & right != 0)
+    })
+}
+
 /// SYS_SEND: rendezvous send of a one-word message on `epid`.
 unsafe fn ipc_send(epid: usize, msg: usize) {
-    if epid >= ipc::NUM_ENDPOINTS {
+    if epid >= ipc::NUM_ENDPOINTS || !current_has_cap(epid, ipc::CAP_SEND) {
+        (*CURRENT_TF).regs[10] = ipc::EPERM; // deny: no SEND capability
         return;
     }
     if let Some(recv_idx) = ipc::ENDPOINTS[epid].receiver.take() {
@@ -196,7 +207,8 @@ unsafe fn ipc_send(epid: usize, msg: usize) {
 
 /// SYS_RECV: rendezvous receive of a one-word message from `epid`.
 unsafe fn ipc_recv(epid: usize) {
-    if epid >= ipc::NUM_ENDPOINTS {
+    if epid >= ipc::NUM_ENDPOINTS || !current_has_cap(epid, ipc::CAP_RECV) {
+        (*CURRENT_TF).regs[10] = ipc::RECV_DENIED; // deny: no RECV capability
         return;
     }
     if let Some((send_idx, msg)) = ipc::ENDPOINTS[epid].sender.take() {
