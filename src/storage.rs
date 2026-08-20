@@ -35,35 +35,30 @@ impl PersistentStorage {
         }
     }
 
-    /// Восстанавливает веса из буфера
-    pub fn load_weights(&self) -> Option<(Vec<f32>, Vec<f32>)> {
-        // В реальности это сложнее, но для примера:
-        let mut weights = Vec::new();
-        let mut output_weights = Vec::new();
-        
+    /// Восстанавливает веса из буфера (no_std: фиксированные массивы вместо Vec)
+    pub fn load_weights(&self) -> Option<([f32; 56], [f32; 8])> {
+        let mut weights = [0.0f32; 56];   // 8×7 входных весов
+        let mut output_weights = [0.0f32; 8];
+
         let mut idx = 0;
-        
+
         // Загружаем входные веса
-        for _ in 0..56 {  // 8×7
+        for w in weights.iter_mut() {
             if idx < 32 {
-                weights.push(f32::from_bits(self.buffer[idx]));
+                *w = f32::from_bits(self.buffer[idx]);
                 idx += 1;
             }
         }
-        
+
         // Загружаем выходные веса
-        for _ in 0..8 {
+        for w in output_weights.iter_mut() {
             if idx < 32 {
-                output_weights.push(f32::from_bits(self.buffer[idx]));
+                *w = f32::from_bits(self.buffer[idx]);
                 idx += 1;
             }
         }
-        
-        if weights.len() > 0 && output_weights.len() > 0 {
-            Some((weights, output_weights))
-        } else {
-            None
-        }
+
+        Some((weights, output_weights))
     }
 
     /// Очищает хранилище

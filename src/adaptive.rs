@@ -30,7 +30,7 @@ impl MetricsCollector {
     }
 
     pub fn get_average(&self, task_id: usize) -> Option<TaskMetrics> {
-        let mut count = 0;
+        let mut count: u32 = 0;
         let mut avg_exec = 0u32;
         let mut avg_wait = 0u32;
         let mut avg_mem = 0usize;
@@ -57,7 +57,7 @@ impl MetricsCollector {
                 task_id,
                 execution_time: avg_exec / count,
                 wait_time: avg_wait / count,
-                memory_used: avg_mem / count,
+                memory_used: avg_mem / count as usize,
                 ticks_since_run: avg_ticks / count,
                 io_wait_count: avg_io / count,
                 context_switches: avg_ctx / count,
@@ -304,14 +304,22 @@ impl AdaptiveScheduler {
         };
 
         // Переключаемся на выбранную задачу
-        if next_idx != self.base_scheduler.current {
-            if let (Some(old_task), Some(new_task)) = (
-                self.base_scheduler.tasks[self.base_scheduler.current].as_mut(),
-                self.base_scheduler.tasks[next_idx].as_mut(),
-            ) {
+        let cur = self.base_scheduler.current;
+        if next_idx != cur {
+            // Получаем два непересекающихся изменяемых ссылки на задачи
+            // (split_at_mut, т.к. индексировать массив дважды нельзя).
+            let (old_slot, new_slot) = if cur < next_idx {
+                let (left, right) = self.base_scheduler.tasks.split_at_mut(next_idx);
+                (&mut left[cur], &mut right[0])
+            } else {
+                let (left, right) = self.base_scheduler.tasks.split_at_mut(cur);
+                (&mut right[0], &mut left[next_idx])
+            };
+
+            if let (Some(old_task), Some(new_task)) = (old_slot.as_mut(), new_slot.as_mut()) {
                 // Обновляем статистику
-                let exec_time = current_tick.saturating_sub(self.execution_start_time[self.base_scheduler.current]);
-                self.total_exec_time[self.base_scheduler.current] = self.total_exec_time[self.base_scheduler.current].saturating_add(exec_time);
+                let exec_time = current_tick.saturating_sub(self.execution_start_time[cur]);
+                self.total_exec_time[cur] = self.total_exec_time[cur].saturating_add(exec_time);
                 
                 old_task.state = TaskState::Ready;
                 new_task.state = TaskState::Running;
