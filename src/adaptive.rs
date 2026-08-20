@@ -1,4 +1,4 @@
-use crate::scheduler::{Scheduler, TaskState};
+use crate::scheduler::{CompatScheduler as Scheduler, TaskState};
 use crate::neural::{NeuralScheduler, TaskMetrics, TaskClass};
 
 pub const METRICS_HISTORY_SIZE: usize = 128;

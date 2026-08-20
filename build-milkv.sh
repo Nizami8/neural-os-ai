@@ -24,7 +24,7 @@ cargo build \
     --target riscv64gc-unknown-linux-gnu \
     --release \
     --bin milkv-userspace \
-    -Z build-std=core,alloc
+    --features std
 
 if [ ! -f "target/riscv64gc-unknown-linux-gnu/release/milkv-userspace" ]; then
     echo "❌ Build failed!"

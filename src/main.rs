@@ -1,243 +1,200 @@
 #![no_std]
 #![no_main]
 
-mod scheduler;
-mod trap;
-mod neural;
-mod adaptive;
-mod storage;
+use neural_os::capability::RIGHT_SEND;
+use neural_os::console;
+use neural_os::kernel::KERNEL;
+use neural_os::neural::TaskClass;
+use neural_os::syscall::{
+    SYS_GETPID, SYS_GETTID, SYS_PRINT, SYS_RECV, SYS_SEND, SYS_YIELD,
+};
+use neural_os::timer;
+use neural_os::trap::trap_return;
 
-use scheduler::Scheduler;
-use trap::init_timer;
-use adaptive::{AdaptiveScheduler, SchedulingStrategy, RewardSignal};
-use neural::TaskClass;
-use storage::PersistentStorage;
-use core::sync::atomic::{AtomicUsize, Ordering};
-
-const UART: *mut u8 = 0x10000000 as *mut u8;
-
-pub static mut SCHED: Scheduler = Scheduler::new();
-pub static mut ADAPTIVE_SCHED: Option<AdaptiveScheduler> = None;
-pub static mut STORAGE: Option<PersistentStorage> = None;
-static TICK_COUNTER: AtomicUsize = AtomicUsize::new(0);
-static USE_AI: AtomicUsize = AtomicUsize::new(0);
-
-fn putc(c: u8) {
-    unsafe { core::ptr::write_volatile(UART, c); }
+fn ecall(nr: usize, mut a0: usize, a1: usize, a2: usize, a3: usize) -> usize {
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            inout("a0") a0,
+            in("a1") a1,
+            in("a2") a2,
+            in("a3") a3,
+            in("a7") nr,
+            options(nostack)
+        );
+    }
+    a0
 }
 
-fn puts(s: &str) {
-    for b in s.bytes() {
-        putc(b);
-    }
+fn sys_yield() {
+    let _ = ecall(SYS_YIELD, 0, 0, 0, 0);
 }
 
-fn print_number(n: usize) {
-    if n == 0 {
-        putc(b'0');
-        return;
-    }
-
-    let mut digits = [0u8; 20];
-    let mut i = 0;
-    let mut num = n;
-
-    while num > 0 && i < 20 {
-        digits[i] = b'0' + (num % 10) as u8;
-        num /= 10;
-        i += 1;
-    }
-
-    while i > 0 {
-        i -= 1;
-        putc(digits[i]);
-    }
+fn sys_print(s: &str) {
+    let _ = ecall(SYS_PRINT, s.as_ptr() as usize, s.len(), 0, 0);
 }
 
-fn print_float(f: f32, decimals: usize) {
-    let int_part = f as i32;
-    if int_part < 0 {
-        putc(b'-');
-    }
-    print_number(int_part.abs() as usize);
-    putc(b'.');
-    
-    let frac = ((f.abs() - (int_part.abs() as f32)) * 100.0) as usize;
-    if frac < 10 {
-        putc(b'0');
-    }
-    print_number(frac);
+fn sys_send(cap: usize, w0: usize, w1: usize, w2: usize) -> usize {
+    ecall(SYS_SEND, cap, w0, w1, w2)
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
-    let mut i = 0;
-    while i < n {
-        *dest.add(i) = *src.add(i);
-        i += 1;
+fn sys_recv(cap: usize) -> (usize, usize, usize, usize) {
+    let a0: usize;
+    let a1: usize;
+    let a2: usize;
+    let a3: usize;
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            inout("a0") cap => a0,
+            lateout("a1") a1,
+            lateout("a2") a2,
+            lateout("a3") a3,
+            in("a7") SYS_RECV,
+            options(nostack)
+        );
     }
-    dest
+    (a0, a1, a2, a3)
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn memset(s: *mut u8, c: i32, n: usize) -> *mut u8 {
-    let mut i = 0;
-    while i < n {
-        *s.add(i) = c as u8;
-        i += 1;
-    }
-    s
-}
-
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    puts("PANIC!\n");
-    loop {}
-}
-
-// ====== ЗАДАЧИ ======
-
-fn task1() {
-    let mut counter = 0u64;
+fn idle_thread() -> ! {
     loop {
-        puts("[T1:");
-        print_number(counter as usize);
-        puts("|RT] ");
-        counter += 1;
+        unsafe { core::arch::asm!("wfi") }
+        sys_yield();
+    }
+}
 
-        for _ in 0..50 {
-            unsafe { core::arch::asm!("nop"); }
+fn server_thread() -> ! {
+    sys_print("[server] recv on cap 1\n");
+    loop {
+        let (st, w0, w1, w2) = sys_recv(1);
+        if st == 0 {
+            sys_print("[server] got ");
+            console::write_usize(w0);
+            sys_print(" from ");
+            console::write_usize(w1);
+            sys_print(" seq=");
+            console::write_usize(w2);
+            sys_print("\n");
+        } else {
+            sys_print("[server] recv err\n");
+            sys_yield();
         }
     }
 }
 
-fn task2() {
-    let mut counter = 0u64;
+fn client_thread() -> ! {
+    sys_print("[client] send on cap 1\n");
+    let mut seq = 0usize;
     loop {
-        puts("[T2:");
-        print_number(counter as usize);
-        puts("|IO] ");
-        counter += 1;
-
-        for _ in 0..75 {
-            unsafe { core::arch::asm!("nop"); }
+        let pid = ecall(SYS_GETPID, 0, 0, 0, 0);
+        let tid = ecall(SYS_GETTID, 0, 0, 0, 0);
+        let st = sys_send(1, 42 + seq, pid, seq);
+        if st == 0 {
+            sys_print("[client] sent seq=");
+            console::write_usize(seq);
+            sys_print(" tid=");
+            console::write_usize(tid);
+            sys_print("\n");
+        } else {
+            sys_print("[client] send err=");
+            console::write_usize(st);
+            sys_print("\n");
         }
+        seq = seq.wrapping_add(1);
+        for _ in 0..4000 {
+            unsafe { core::arch::asm!("nop") }
+        }
+        sys_yield();
     }
 }
 
-fn task3() {
-    let mut counter = 0u64;
+fn denied_thread() -> ! {
+    // Only RIGHT_RECV was granted; send must be rejected.
+    let st = sys_send(1, 99, 0, 0);
+    sys_print("[denied] send status=");
+    console::write_usize(st);
+    sys_print(" (expect denied)\n");
     loop {
-        puts("[T3:");
-        print_number(counter as usize);
-        puts("|BG] ");
-        counter += 1;
-
-        for _ in 0..100 {
-            unsafe { core::arch::asm!("nop"); }
-        }
+        sys_yield();
+        unsafe { core::arch::asm!("wfi") }
     }
 }
-
-// ====== ГЛАВНАЯ ФУНКЦИЯ ======
 
 #[no_mangle]
 pub extern "C" fn rust_main() -> ! {
-    puts("\n");
-    puts("╔═══════════════════════════════════════════════════════════╗\n");
-    puts("║   🤖 Neural OS v0.9 - Full AI Orchestration Kernel     ║\n");
-    puts("║   • MLP with Momentum SGD                               ║\n");
-    puts("║   • Load Balancing + Fairness                           ║\n");
-    puts("║   • Predictive Preemption + Q-Learning                 ║\n");
-    puts("║   • Real-time Priority + Persistent Memory             ║\n");
-    puts("╚═══════════════════════════════════════════════════════════╝\n");
-    puts("\n");
+    console::write_str("\n");
+    console::write_str("╔═══════════════════════════════════════════════════════════╗\n");
+    console::write_str("║  Neural OS v1.0-alpha  Stage 4: IPC + Capabilities      ║\n");
+    console::write_str("║  • TrapFrame context switch + preemptive RR             ║\n");
+    console::write_str("║  • Process/Thread + syscalls                            ║\n");
+    console::write_str("║  • Endpoint rendezvous (blocking send/recv)             ║\n");
+    console::write_str("║  • Capability rights + generation checks                ║\n");
+    console::write_str("╚═══════════════════════════════════════════════════════════╝\n\n");
 
     unsafe {
-        let mut adaptive = AdaptiveScheduler::new();
-        
-        // Инициализируем storage для сохранения весов
-        let storage = PersistentStorage::new();
-        STORAGE = Some(storage);
+        let k = &mut KERNEL;
 
-        puts("📊 Initializing advanced scheduler...\n");
-        
-        // Добавляем задачи с классами
-        adaptive.add_task(1, task1, TaskClass::RealTime);      // жесткие deadline'ы
-        adaptive.add_task(2, task2, TaskClass::Interactive);   // низкий latency
-        adaptive.add_task(3, task3, TaskClass::Batch);         // фоновая работа
+        let (_idle_pid, idle_tid) = k
+            .spawn(idle_thread as usize, TaskClass::Batch, 1)
+            .expect("idle");
+        let (server_pid, _server_tid) = k
+            .spawn(server_thread as usize, TaskClass::Interactive, 8)
+            .expect("server");
+        let (client_pid, _client_tid) = k
+            .spawn(client_thread as usize, TaskClass::Interactive, 8)
+            .expect("client");
+        let (denied_pid, _denied_tid) = k
+            .spawn(denied_thread as usize, TaskClass::Batch, 2)
+            .expect("denied");
 
-        puts("🧠 Neural network initialized (MLP 7→8→1)\n");
-        puts("   Architecture: Input(7) → Hidden(8, ReLU) → Output(1, Sigmoid)\n");
-        puts("   Optimizer: SGD with Momentum (α=0.01, β=0.9)\n");
-        
-        puts("\n📈 Scheduling Strategy: LoadBalanced + Predictive\n");
-        adaptive.strategy = SchedulingStrategy::LoadBalanced;
-        
-        puts("   Output weights: ");
-        let weights = adaptive.get_neural_weights();
-        for i in 0..4 {
-            print_float(weights[i], 2);
-            if i < 3 { puts(", "); }
-        }
-        puts("\n");
+        let ep = k.endpoints.alloc().expect("endpoint");
+        k.install_endpoint_caps(ep, server_pid, client_pid)
+            .expect("caps");
 
-        puts("⏱️  Setting task deadlines...\n");
-        adaptive.set_task_deadline(1, 200);  // Task 1: hard deadline через 200 тиков
-        puts("   T1: 200 ticks (RealTime)\n");
-        puts("   T2: unlimited (Interactive)\n");
-        puts("   T3: unlimited (Batch)\n");
+        let gen = k.endpoints.slots[ep].generation;
+        k.processes.slots[denied_pid]
+            .caps
+            .insert(neural_os::capability::Capability::endpoint(
+                ep as u16,
+                gen,
+                neural_os::capability::RIGHT_RECV,
+                denied_pid as u16,
+            ))
+            .expect("denied cap");
 
-        puts("\n⏳ Starting with 10ms quantum timers...\n");
-        puts("────────────────────────────────────────────────────────\n\n");
+        let _ = RIGHT_SEND;
 
-        ADAPTIVE_SCHED = Some(adaptive);
-        USE_AI.store(1, Ordering::Relaxed);
+        console::write_str("endpoint=");
+        console::write_usize(ep);
+        console::write_str(" server_pid=");
+        console::write_usize(server_pid);
+        console::write_str(" client_pid=");
+        console::write_usize(client_pid);
+        console::write_str("\nstarting threads...\n\n");
 
-        init_timer();
+        k.cpu.current = idle_tid;
+        k.scheduler.current = idle_tid;
+        k.threads.slots[idle_tid].state = neural_os::thread::ThreadState::Running;
+        k.cpu.scheduler_enabled = true;
+
+        timer::init();
+
+        let tf = k.current_trapframe_ptr();
+        trap_return(tf);
     }
+}
 
-    // Главный loop с периодическим мониторингом
-    let mut stat_counter = 0;
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    console::write_str("PANIC: ");
+    if let Some(loc) = info.location() {
+        console::write_str(loc.file());
+        console::write_str(":");
+        console::write_usize(loc.line() as usize);
+        console::write_str("\n");
+    }
     loop {
-        unsafe {
-            core::arch::asm!("wfi");
-            
-            stat_counter += 1;
-            
-            // Каждые 1000 тиков выводим статистику
-            if stat_counter >= 1000 {
-                stat_counter = 0;
-                
-                if let Some(ref mut adaptive) = ADAPTIVE_SCHED {
-                    adaptive.collect_statistics();
-                    
-                    puts("\n");
-                    puts("📊 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ STATISTICS ━━━━━━━━\n");
-                    puts("   Context Switches: ");
-                    print_number(adaptive.stats.total_context_switches as usize);
-                    puts("\n");
-                    
-                    puts("   Avg Wait Time: ");
-                    print_float(adaptive.stats.avg_wait_time, 2);
-                    puts(" ticks\n");
-                    
-                    puts("   Fairness Index: ");
-                    print_float(adaptive.stats.fairness_index, 2);
-                    puts(" (1.0 = perfect)\n");
-                    
-                    puts("   Neural Output Weights: ");
-                    let w = adaptive.get_neural_weights();
-                    for i in 0..3 {
-                        print_float(w[i], 2);
-                        puts(", ");
-                    }
-                    print_float(w[3], 2);
-                    puts("\n");
-                    
-                    puts("────────────────────────────────────────────────────────\n\n");
-                }
-            }
-        }
+        unsafe { core::arch::asm!("wfi") }
     }
 }

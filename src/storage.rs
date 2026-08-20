@@ -1,75 +1,87 @@
-/// Persistent storage for neural network weights
-/// Saves/loads learned weights across system restarts
+/// Persistent storage for neural network weights.
+/// Saves/loads learned weights across system restarts.
 
 pub struct PersistentStorage {
-    pub buffer: [u32; 32],  // 32 x 32-bit = 128 bytes для весов
+    pub buffer: [u32; 32],
 }
 
 impl PersistentStorage {
     pub fn new() -> Self {
-        PersistentStorage {
-            buffer: [0; 32],
-        }
+        PersistentStorage { buffer: [0; 32] }
     }
 
-    /// Сохраняет веса нейросети в буфер (в реальном OS это была бы запись в EEPROM/Flash)
     pub fn save_weights(&mut self, weights: &[[f32; 7]; 8], output_weights: &[f32; 8]) {
         let mut idx = 0;
-        
-        // Сохраняем входные веса (8 нейронов × 7 входов)
-        for i in 0..8 {
-            for j in 0..7 {
+
+        for row in weights.iter() {
+            for value in row.iter() {
                 if idx < 32 {
-                    self.buffer[idx] = weights[i][j].to_bits();
+                    self.buffer[idx] = value.to_bits();
                     idx += 1;
                 }
             }
         }
-        
-        // Сохраняем выходные веса (8 весов)
-        for i in 0..8 {
+
+        for value in output_weights.iter() {
             if idx < 32 {
-                self.buffer[idx] = output_weights[i].to_bits();
+                self.buffer[idx] = value.to_bits();
                 idx += 1;
             }
         }
     }
 
-    /// Восстанавливает веса из буфера
-    pub fn load_weights(&self) -> Option<(Vec<f32>, Vec<f32>)> {
-        // В реальности это сложнее, но для примера:
-        let mut weights = Vec::new();
-        let mut output_weights = Vec::new();
-        
+    pub fn load_weights(&self) -> Option<([[f32; 7]; 8], [f32; 8])> {
+        if self.buffer.iter().all(|&w| w == 0) {
+            return None;
+        }
+
+        let mut weights = [[0.0f32; 7]; 8];
+        let mut output = [0.0f32; 8];
         let mut idx = 0;
-        
-        // Загружаем входные веса
-        for _ in 0..56 {  // 8×7
+
+        for row in weights.iter_mut() {
+            for value in row.iter_mut() {
+                if idx < 32 {
+                    *value = f32::from_bits(self.buffer[idx]);
+                    idx += 1;
+                }
+            }
+        }
+
+        for value in output.iter_mut() {
             if idx < 32 {
-                weights.push(f32::from_bits(self.buffer[idx]));
+                *value = f32::from_bits(self.buffer[idx]);
                 idx += 1;
             }
         }
-        
-        // Загружаем выходные веса
-        for _ in 0..8 {
-            if idx < 32 {
-                output_weights.push(f32::from_bits(self.buffer[idx]));
-                idx += 1;
-            }
-        }
-        
-        if weights.len() > 0 && output_weights.len() > 0 {
-            Some((weights, output_weights))
-        } else {
-            None
-        }
+
+        Some((weights, output))
     }
 
-    /// Очищает хранилище
     pub fn clear(&mut self) {
-        for i in 0..32 {
-            self.buffer[i] = 0;
-        }
+        self.buffer = [0; 32];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trip_nonzero_weights() {
+        let mut store = PersistentStorage::new();
+        let mut hidden = [[0.0f32; 7]; 8];
+        hidden[0][0] = 0.75;
+        let output = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
+        store.save_weights(&hidden, &output);
+        let (h, o) = store.load_weights().unwrap();
+        assert!((h[0][0] - 0.75).abs() < 1e-6);
+        assert!((o[0] - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn empty_buffer_loads_nothing() {
+        let store = PersistentStorage::new();
+        assert!(store.load_weights().is_none());
     }
 }

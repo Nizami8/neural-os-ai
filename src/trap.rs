@@ -1,60 +1,57 @@
-use core::arch::asm;
-use crate::ADAPTIVE_SCHED;
-use crate::USE_AI;
+use crate::trapframe::TrapFrame;
 
-const SBI_SET_TIMER: usize = 0;
-const TIMEBASE_FREQ: u64 = 10_000_000; // 10 MHz (QEMU default)
-const TIMER_INTERVAL: u64 = TIMEBASE_FREQ / 100; // 100 Hz (10ms)
-
-unsafe fn sbi_set_timer(stime: u64) {
-    asm!(
-        "li a7, 0",
-        "mv a0, {}",
-        "ecall",
-        in(reg) stime,
-        options(nostack)
-    );
-}
-
-unsafe fn read_time() -> u64 {
-    let time: u64;
-    asm!(
-        "rdcycle {}",
-        out(reg) time,
-        options(nostack)
-    );
-    time
-}
+const MCAUSE_INT: usize = 1 << 63;
+const CAUSE_MTIMER: usize = 7;
+const CAUSE_ECALL_U: usize = 8;
+const CAUSE_ECALL_M: usize = 11;
+const CAUSE_ECALL_S: usize = 9;
 
 #[no_mangle]
-pub extern "C" fn rust_trap_handler() {
+pub extern "C" fn rust_trap_handler(tf: *mut TrapFrame) -> *mut TrapFrame {
     unsafe {
-        let mcause: usize;
-        asm!("csrr {}, mcause", out(reg) mcause, options(nostack));
+        let tf = &mut *tf;
+        let k = &mut crate::kernel::KERNEL;
+        let mcause = tf.mcause;
 
-        if mcause & (1 << 63) != 0 {
-            let cause = mcause & 0xFFF;
-
-            if cause == 7 {
-                // AI scheduler
-                if USE_AI.load(core::sync::atomic::Ordering::Relaxed) == 1 {
-                    if let Some(ref mut adaptive) = ADAPTIVE_SCHED {
-                        adaptive.adaptive_schedule();
+        if mcause & MCAUSE_INT != 0 {
+            if mcause & 0xfff == CAUSE_MTIMER {
+                k.on_timer();
+                crate::timer::ack();
+                if k.want_resched {
+                    k.reschedule();
+                }
+            }
+        } else {
+            match mcause & 0xfff {
+                CAUSE_ECALL_U | CAUSE_ECALL_S | CAUSE_ECALL_M => {
+                    crate::syscall::dispatch(k, tf);
+                    if k.want_resched {
+                        k.reschedule();
                     }
                 }
-
-                let next = read_time() + TIMER_INTERVAL;
-                sbi_set_timer(next);
+                cause => {
+                    crate::console::write_str("unexpected trap cause=");
+                    crate::console::write_usize(cause);
+                    crate::console::write_str(" epc=");
+                    crate::console::write_usize(tf.mepc);
+                    crate::console::write_str("\n");
+                    k.sys_exit();
+                    k.want_resched = true;
+                    k.reschedule();
+                }
             }
         }
+
+        k.current_trapframe_ptr()
     }
 }
 
-pub unsafe fn init_timer() {
-    asm!("csrw mie, 0", options(nostack));
-    asm!("csrrsi t0, mie, 7", options(nostack));
-    asm!("csrrsi t0, mstatus, 8", options(nostack));
+#[cfg(not(any(test, feature = "std")))]
+extern "C" {
+    pub fn trap_return(tf: *mut TrapFrame) -> !;
+}
 
-    let next = read_time() + TIMER_INTERVAL;
-    sbi_set_timer(next);
+#[cfg(any(test, feature = "std"))]
+pub unsafe fn trap_return(_tf: *mut TrapFrame) -> ! {
+    loop {}
 }

@@ -1,10 +1,13 @@
+[target.riscv64gc-unknown-none-elf]
+linker = "rust-lld"
+rustflags = [
+    "-C", "relocation-model=static",
+    "-C", "link-arg=-Tlinker.ld",
+]
+
 [target.riscv64gc-unknown-linux-gnu]
 linker = "riscv64-unknown-linux-gnu-gcc"
 rustflags = [
     "-C", "target-feature=+d,+f,+m",
     "-C", "link-arg=-Wl,-O2",
-    "-C", "opt-level=z",
 ]
-
-[build]
-target = "riscv64gc-unknown-linux-gnu"

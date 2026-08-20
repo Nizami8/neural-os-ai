@@ -1,104 +1,70 @@
-#![cfg_attr(not(test), no_std)]
-#![cfg_attr(not(test), no_main)]
+//! Linux/Milk-V userspace simulation of Neural OS scheduling + IPC.
 
-mod scheduler;
-mod trap;
-mod neural;
-mod adaptive;
+use neural_os::adaptive::{AdaptiveScheduler, RewardSignal, SchedulingStrategy};
+use neural_os::capability::{Capability, CapabilityTable, RIGHT_RECV, RIGHT_SEND};
+use neural_os::ipc::{Endpoint, Message};
+use neural_os::kernel::Kernel;
+use neural_os::neural::TaskClass;
+use neural_os::syscall::OK;
+use neural_os::thread::ThreadState;
 
-use adaptive::AdaptiveScheduler;
-use neural::TaskClass;
+fn dummy() {}
 
-#[cfg(test)]
-fn main() {}
-
-#[cfg(not(test))]
-#[no_mangle]
-pub extern "C" fn main() -> i32 {
-    println!("\n🤖 Neural OS v0.9 - Milk-V Duo 256M Optimized");
+fn main() {
+    println!("\n🤖 Neural OS v1.0-alpha — Milk-V / host simulation");
     println!("═══════════════════════════════════════");
 
     let mut adaptive = AdaptiveScheduler::new();
+    adaptive.add_task(1, dummy, TaskClass::RealTime);
+    adaptive.add_task(2, dummy, TaskClass::Batch);
+    adaptive.strategy = SchedulingStrategy::LoadBalanced;
+    adaptive.set_task_deadline(1, 200);
+    adaptive.learn_with_reward(RewardSignal {
+        task_id: 1,
+        reward: 1.0,
+    });
+    adaptive.collect_statistics();
 
-    println!("📊 Initializing 2-core scheduler...");
-    println!("   Memory: 256 MB");
-    println!("   History: 32 samples (optimized)");
-    
-    // Добавляем 2 задачи (max для 256MB)
-    adaptive.add_task(1, task1, TaskClass::RealTime);
-    adaptive.add_task(2, task2, TaskClass::Batch);
+    println!("MLP 7→8→1  fairness={:.2}", adaptive.stats.fairness_index);
+    let w = adaptive.get_neural_weights();
+    println!("neural out[0..4]: {:.3} {:.3} {:.3} {:.3}", w[0], w[1], w[2], w[3]);
 
-    println!("🧠 MLP Network: 7→8→1");
-    println!("   Momentum SGD enabled");
-    
-    println!("⏱️  Starting 10ms quantum timers...");
-    println!("═══════════════════════════════════════\n");
+    let mut kernel = Kernel::new();
+    let (server_pid, server_tid) = kernel
+        .spawn(dummy as usize, TaskClass::Interactive, 8)
+        .unwrap();
+    let (client_pid, client_tid) = kernel
+        .spawn(dummy as usize, TaskClass::Batch, 4)
+        .unwrap();
+    let ep = kernel.endpoints.alloc().unwrap();
+    let (_sc, cc) = kernel
+        .install_endpoint_caps(ep, server_pid, client_pid)
+        .unwrap();
 
-    // Эмулируем scheduler в цикле
-    let mut tick = 0;
-    let mut stat_counter = 0;
-    
-    loop {
-        // Симулируем tick каждую миллисекунду
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        tick += 1;
-        stat_counter += 1;
-        
-        // Каждые 500 тиков выводим статистику
-        if stat_counter >= 500 {
-            stat_counter = 0;
-            adaptive.collect_statistics();
-            
-            println!("\n📊 Statistics (tick={}):", tick);
-            println!("   Context Switches: {}", adaptive.stats.total_context_switches);
-            println!("   Avg Wait Time: {:.2} ticks", adaptive.stats.avg_wait_time);
-            println!("   Fairness Index: {:.2}", adaptive.stats.fairness_index);
-            
-            let weights = adaptive.get_neural_weights();
-            print!("   Neural Weights: ");
-            for (i, w) in weights.iter().take(4).enumerate() {
-                if i > 0 { print!(", "); }
-                print!("{:.3}", w);
-            }
-            println!();
-            println!("═══════════════════════════════════════\n");
-        }
-    }
-}
+    kernel.cpu.current = server_tid;
+    kernel.threads.slots[server_tid].state = ThreadState::Running;
+    assert_eq!(kernel.sys_recv(1), OK);
+    assert_eq!(
+        kernel.threads.slots[server_tid].state,
+        ThreadState::BlockedRecv
+    );
 
-fn task1() {
-    let mut counter = 0u64;
-    loop {
-        print!("[T1:{}", counter);
-        print!("]");
-        counter += 1;
-        
-        // Небольшая работа
-        for _ in 0..50 {
-            core::arch::asm!("nop");
-        }
-    }
-}
+    kernel.cpu.current = client_tid;
+    kernel.threads.slots[client_tid].state = ThreadState::Running;
+    assert_eq!(kernel.sys_send(cc, 42, 1, 0), OK);
+    assert_eq!(kernel.threads.slots[server_tid].ipc_msg.words[0], 42);
 
-fn task2() {
-    let mut counter = 0u64;
-    loop {
-        print!("[T2:{}", counter);
-        print!("]");
-        counter += 1;
-        
-        for _ in 0..100 {
-            core::arch::asm!("nop");
-        }
-    }
-}
+    let mut table = CapabilityTable::new();
+    table
+        .insert(Capability::endpoint(1, 1, RIGHT_RECV, 1))
+        .unwrap();
+    assert!(table.lookup_endpoint(1, RIGHT_SEND, 1, 0).is_err());
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+    let mut ep_obj = Endpoint::empty();
+    ep_obj.activate();
+    let _ = Message::new(client_tid, 1, 2, 3);
 
-    #[test]
-    fn test_memory_footprint() {
-        assert!(std::mem::size_of::<AdaptiveScheduler>() < 1024 * 256);
-    }
+    println!("IPC rendezvous: ok");
+    println!("capability deny-without-SEND: ok");
+    println!("═══════════════════════════════════════");
 }

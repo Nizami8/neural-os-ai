@@ -1,0 +1,40 @@
+[package]
+name = "neural-os"
+version = "1.0.0"
+edition = "2021"
+authors = ["Nizami"]
+description = "Neural OS — RISC-V microkernel with L4-style IPC and an AI scheduling observer"
+license = "MIT"
+publish = false
+
+[lib]
+name = "neural_os"
+path = "src/lib.rs"
+test = true
+
+[[bin]]
+name = "kernel"
+path = "src/main.rs"
+required-features = ["kernel"]
+test = false
+bench = false
+doctest = false
+
+[[bin]]
+name = "milkv-userspace"
+path = "src/bin/milkv-userspace.rs"
+required-features = ["std"]
+
+[features]
+default = []
+std = []
+kernel = []
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = "z"
+codegen-units = 1
