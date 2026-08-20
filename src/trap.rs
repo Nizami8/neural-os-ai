@@ -14,8 +14,9 @@ const CLINT_MTIMECMP: *mut u64 = 0x0200_4000 as *mut u64;
 // mtime runs at 10 MHz on QEMU virt; time slice between preemptions.
 const TIMER_INTERVAL: u64 = 100_000; // ~10 ms quantum
 
-// Print a statistics block every N timer ticks.
-const STATS_EVERY: usize = 40;
+// Print an automatic statistics block every N timer ticks. Kept infrequent so
+// it does not clutter the interactive shell (use the `stats` command on demand).
+const STATS_EVERY: usize = 2000;
 
 /// Pointer to the TrapFrame of the currently running task. Read and written by
 /// the assembly trap vector (trap.s) and updated here when the scheduler picks
@@ -124,6 +125,22 @@ unsafe fn handle_syscall() {
         syscall::SYS_EXIT => reschedule(TaskState::Terminated),
         syscall::SYS_SEND => ipc_send(arg0, arg1),
         syscall::SYS_RECV => ipc_recv(arg0),
+        syscall::SYS_PS => {
+            if let Some(a) = ADAPTIVE_SCHED.as_ref() {
+                crate::print_ps(a);
+            }
+        }
+        syscall::SYS_STATS => {
+            if let Some(a) = ADAPTIVE_SCHED.as_mut() {
+                a.collect_statistics();
+                crate::print_stats(a);
+            }
+        }
+        syscall::SYS_NN => {
+            if let Some(a) = ADAPTIVE_SCHED.as_ref() {
+                crate::print_nn(a);
+            }
+        }
         _ => {}
     }
 }

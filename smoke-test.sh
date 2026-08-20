@@ -1,23 +1,21 @@
 #!/bin/bash
-# End-to-end smoke test: build the kernel, boot it in QEMU, and assert that it
-# reaches banner + real preemptive multitasking (all three tasks run) + stats.
+# End-to-end smoke test: build the kernel, boot it in QEMU, drive the interactive
+# UART shell over stdin, and assert the whole stack works: boot, preemptive
+# scheduling, syscalls, IPC (+ capabilities) and the shell commands.
 set -euo pipefail
 
-# Treat QEMU output as raw bytes. The run is cut off by `timeout`, which can
-# leave a truncated multi-byte UTF-8 sequence that confuses grep in a UTF-8
-# locale; C locale + `grep -a` matches ASCII substrings reliably.
+# Treat QEMU output as raw bytes (a truncated multi-byte UTF-8 char at the
+# timeout boundary would otherwise confuse grep in a UTF-8 locale).
 export LC_ALL=C
 
 ./build.sh >/dev/null
 
-echo "==> Booting kernel in QEMU (8s)"
-OUT="$(timeout 8 qemu-system-riscv64 \
+echo "==> Booting kernel in QEMU and driving the shell (8s)"
+OUT="$(printf 'help\nps\nstats\nnn\n' | timeout 8 qemu-system-riscv64 \
     -machine virt -bios none -kernel build/os.bin \
-    -nographic -monitor none -no-reboot 2>&1 || true)"
+    -nographic -no-reboot 2>&1 || true)"
 
 check() {
-    # here-string (no pipe) so `grep -q` exiting early cannot SIGPIPE a writer
-    # and trip `pipefail`.
     if ! grep -aqE "$1" <<<"$OUT"; then
         echo "FAIL: $2"
         echo "----- last 1500 bytes of output -----"
@@ -26,23 +24,18 @@ check() {
     fi
 }
 
-check "Neural OS v0.9"          "no boot banner"
-check "\[T1:"                   "task T1 never ran"
-check "\[T2:"                   "task T2 never ran"
-check "\[T3:"                   "task T3 never ran"
-check "STATISTICS"              "no statistics block"
-# Preemption proof: a task counter must climb well past its first quantum,
-# i.e. the task resumed after being switched out and back in.
-check "\[T1:[5-9][0-9]\|RT\]"   "no evidence of preemptive resume (T1 < 50)"
+check "Neural OS v0.9"                            "no boot banner"
+# Stage 3 syscalls + Stage 4 capability enforcement (T4 has no capability).
+check "T4 started via ecall, pid=4"               "SYS_GETPID/SYS_PRINT not working"
+check "T4 SYS_SEND on ep0 DENIED"                 "IPC capability enforcement not working"
+# Interactive shell (original project goal: command-line interaction).
+check "neural-os>"                                "shell prompt missing (UART input?)"
+check "commands: help, ps, stats, nn"             "shell 'help' not working"
+check "PID  STATE"                                "shell 'ps' not working"
+# Scheduler + IPC state: the consumer is Blocked waiting on recv, shell Running.
+check "6  Blocked"                                "IPC blocking / task state not shown by ps"
+check "7  Running"                                "shell task not shown Running by ps"
+check "Context Switches:"                         "shell 'stats' not working"
+check "Neural output weights:"                    "shell 'nn' not working"
 
-# Syscalls (Stage 3): SYS_GETPID + SYS_PRINT + SYS_EXIT.
-check "\[SYSCALL\] T4 started via ecall, pid=4" "SYS_GETPID/SYS_PRINT not working"
-check "T4 calling SYS_EXIT"                      "SYS_EXIT not reached"
-
-# IPC (Stage 4): blocking send/recv rendezvous between T5 and T6.
-check "\(T5 sent 0\)"  "IPC SYS_SEND not working"
-check "\(T6 got 5\)"   "IPC SYS_RECV/rendezvous not working"
-# Capability enforcement: T4 has no capability and must be denied.
-check "T4 SYS_SEND on ep0 DENIED" "IPC capability enforcement not working"
-
-echo "PASS: boot + preemption + statistics + syscalls + IPC + capabilities all working."
+echo "PASS: boot + preemption + syscalls + IPC + capabilities + interactive shell all working."

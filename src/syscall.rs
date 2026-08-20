@@ -14,6 +14,9 @@ pub const SYS_PRINT: usize = 2;
 pub const SYS_EXIT: usize = 3;
 pub const SYS_SEND: usize = 4;
 pub const SYS_RECV: usize = 5;
+pub const SYS_PS: usize = 6;
+pub const SYS_STATS: usize = 7;
+pub const SYS_NN: usize = 8;
 
 /// Return the current task's id.
 pub fn sys_getpid() -> usize {
@@ -99,4 +102,25 @@ pub fn sys_recv(endpoint: usize) -> usize {
         );
     }
     msg
+}
+
+/// Ask the kernel to print the task table.
+pub fn sys_ps() {
+    unsafe {
+        asm!("ecall", in("a7") SYS_PS);
+    }
+}
+
+/// Ask the kernel to print scheduler statistics.
+pub fn sys_stats() {
+    unsafe {
+        asm!("ecall", in("a7") SYS_STATS);
+    }
+}
+
+/// Ask the kernel to print the neural network's output weights.
+pub fn sys_nn() {
+    unsafe {
+        asm!("ecall", in("a7") SYS_NN);
+    }
 }

@@ -10,7 +10,7 @@ mod neural;
 mod adaptive;
 mod storage;
 
-use scheduler::Scheduler;
+use scheduler::{Scheduler, TaskState};
 use trap::init_timer;
 use adaptive::{AdaptiveScheduler, SchedulingStrategy, RewardSignal};
 use neural::TaskClass;
@@ -27,6 +27,16 @@ static USE_AI: AtomicUsize = AtomicUsize::new(0);
 
 fn putc(c: u8) {
     unsafe { core::ptr::write_volatile(UART, c); }
+}
+
+// NS16550 UART receive path (QEMU virt): LSR at offset 5, bit 0 = data ready;
+// RBR at offset 0 (same address as THR, but reads return received bytes).
+fn uart_can_read() -> bool {
+    unsafe { core::ptr::read_volatile(UART.add(5)) & 1 != 0 }
+}
+
+fn uart_getc() -> u8 {
+    unsafe { core::ptr::read_volatile(UART) }
 }
 
 fn puts(s: &str) {
@@ -100,45 +110,88 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 
 // ====== ЗАДАЧИ ======
 
+// Background compute tasks. They run silently (so the interactive shell stays
+// readable) but keep consuming CPU, so `ps` shows their run time growing and the
+// preemptive scheduler visibly juggling them.
 fn task1() {
-    let mut counter = 0u64;
+    let mut work = 0u64;
     loop {
-        puts("[T1:");
-        print_number(counter as usize);
-        puts("|RT] ");
-        counter += 1;
-
-        for _ in 0..2_000_000 {
+        work = work.wrapping_add(1);
+        core::hint::black_box(work);
+        for _ in 0..300_000 {
             unsafe { core::arch::asm!("nop"); }
         }
     }
 }
 
 fn task2() {
-    let mut counter = 0u64;
+    let mut work = 0u64;
     loop {
-        puts("[T2:");
-        print_number(counter as usize);
-        puts("|IO] ");
-        counter += 1;
-
-        for _ in 0..2_600_000 {
+        work = work.wrapping_add(1);
+        core::hint::black_box(work);
+        for _ in 0..500_000 {
             unsafe { core::arch::asm!("nop"); }
         }
     }
 }
 
 fn task3() {
-    let mut counter = 0u64;
+    let mut work = 0u64;
     loop {
-        puts("[T3:");
-        print_number(counter as usize);
-        puts("|BG] ");
-        counter += 1;
-
-        for _ in 0..3_200_000 {
+        work = work.wrapping_add(1);
+        core::hint::black_box(work);
+        for _ in 0..700_000 {
             unsafe { core::arch::asm!("nop"); }
         }
+    }
+}
+
+// Interactive UART shell: reads a command line and asks the kernel (via
+// syscalls) to report state. This realizes the project's original goal of
+// interacting with the OS through a command line.
+fn task7_shell() {
+    syscall::sys_print("\n[shell] ready. commands: help ps stats nn\nneural-os> ");
+    let mut buf = [0u8; 64];
+    let mut len = 0usize;
+    loop {
+        if uart_can_read() {
+            let c = uart_getc();
+            match c {
+                b'\r' | b'\n' => {
+                    syscall::sys_print("\n");
+                    shell_exec(&buf[..len]);
+                    len = 0;
+                    syscall::sys_print("neural-os> ");
+                }
+                0x08 | 0x7f => {
+                    if len > 0 {
+                        len -= 1;
+                        syscall::sys_print("\x08 \x08");
+                    }
+                }
+                _ => {
+                    if len < buf.len() {
+                        buf[len] = c;
+                        len += 1;
+                        let one = [c];
+                        if let Ok(s) = core::str::from_utf8(&one) {
+                            syscall::sys_print(s); // echo
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn shell_exec(cmd: &[u8]) {
+    match cmd {
+        b"help" => syscall::sys_print("commands: help, ps, stats, nn\n"),
+        b"ps" => syscall::sys_ps(),
+        b"stats" => syscall::sys_stats(),
+        b"nn" => syscall::sys_nn(),
+        b"" => {}
+        _ => syscall::sys_print("unknown command (try: help)\n"),
     }
 }
 
@@ -182,12 +235,11 @@ const DEMO_ENDPOINT: usize = 0;
 fn task5_ipc_producer() {
     let mut value = 0usize;
     loop {
-        syscall::sys_send(DEMO_ENDPOINT, value);
-        syscall::sys_print("(T5 sent ");
-        syscall::sys_print_usize(value);
-        syscall::sys_print(") ");
+        // Silent IPC so the interactive shell console stays clean; the effect is
+        // observable via `ps` (the consumer sits Blocked between messages).
+        let _ = syscall::sys_send(DEMO_ENDPOINT, value);
         value += 1;
-        for _ in 0..3_000_000 {
+        for _ in 0..8_000_000 {
             unsafe { core::arch::asm!("nop"); }
         }
     }
@@ -195,10 +247,7 @@ fn task5_ipc_producer() {
 
 fn task6_ipc_consumer() {
     loop {
-        let got = syscall::sys_recv(DEMO_ENDPOINT);
-        syscall::sys_print("(T6 got ");
-        syscall::sys_print_usize(got);
-        syscall::sys_print(") ");
+        let _ = syscall::sys_recv(DEMO_ENDPOINT);
     }
 }
 
@@ -232,6 +281,7 @@ pub extern "C" fn rust_main() -> ! {
         adaptive.add_task(4, task4_syscalls, TaskClass::Batch);      // демо системных вызовов
         adaptive.add_task(5, task5_ipc_producer, TaskClass::Batch);  // IPC producer
         adaptive.add_task(6, task6_ipc_consumer, TaskClass::Batch);  // IPC consumer
+        adaptive.add_task(7, task7_shell, TaskClass::Interactive);   // interactive UART shell
 
         // Capabilities: only T5 may send and only T6 may recv on the endpoint.
         adaptive.grant_cap(5, DEMO_ENDPOINT, ipc::CAP_SEND);
@@ -275,6 +325,44 @@ pub extern "C" fn rust_main() -> ! {
         init_timer();
         trap::start_scheduling();
     }
+}
+
+/// Print the task table (served by SYS_PS).
+pub fn print_ps(adaptive: &adaptive::AdaptiveScheduler) {
+    puts("\nPID  STATE     CLASS  CPU(ticks)\n");
+    for (i, slot) in adaptive.base_scheduler.tasks.iter().enumerate() {
+        if let Some(t) = slot {
+            puts("  ");
+            print_number(t.id);
+            puts("  ");
+            puts(match t.state {
+                TaskState::Ready => "Ready    ",
+                TaskState::Running => "Running  ",
+                TaskState::Blocked => "Blocked  ",
+                TaskState::Terminated => "Term     ",
+            });
+            puts(match adaptive.task_classes[i] {
+                TaskClass::RealTime => "RT     ",
+                TaskClass::Interactive => "IO     ",
+                TaskClass::Batch => "BG     ",
+            });
+            print_number(adaptive.total_exec_time[i] as usize);
+            puts("\n");
+        }
+    }
+}
+
+/// Print the neural network's output weights (served by SYS_NN).
+pub fn print_nn(adaptive: &adaptive::AdaptiveScheduler) {
+    puts("\nNeural output weights: ");
+    let w = adaptive.get_neural_weights();
+    for i in 0..8 {
+        print_float(w[i], 2);
+        if i < 7 {
+            puts(", ");
+        }
+    }
+    puts("\n");
 }
 
 /// Print a live statistics block. Called from the timer trap handler.

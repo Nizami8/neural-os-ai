@@ -9,7 +9,7 @@
 use crate::trapframe::{TrapFrame, MSTATUS_INIT};
 use crate::ipc::NUM_ENDPOINTS;
 
-pub const MAX_TASKS: usize = 6;
+pub const MAX_TASKS: usize = 7;
 
 /// Per-task stack size (16 KiB). Task code is tiny; the neural scheduler runs on
 /// the separate kernel stack inside the trap handler.
