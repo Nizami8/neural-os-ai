@@ -169,7 +169,7 @@ impl NeuralScheduler {
         let output_error = target - output;
         
         // Если ошибка слишком мала, не обновляем
-        if output_error.abs() < 0.001 {
+        if fabs(output_error) < 0.001 {
             return;
         }
 
@@ -211,6 +211,12 @@ impl NeuralScheduler {
     }
 }
 
+/// Absolute value that works in both `no_std` and host-test builds.
+#[inline]
+pub fn fabs(x: f32) -> f32 {
+    if x.is_sign_negative() { -x } else { x }
+}
+
 /// Sigmoid активационная функция
 #[inline]
 pub fn sigmoid(x: f32) -> f32 {
@@ -250,7 +256,7 @@ mod tests {
 
     #[test]
     fn sigmoid_is_bounded() {
-        assert!((sigmoid(0.0) - 0.5).abs() < 1e-3);
+        assert!(fabs(sigmoid(0.0) - 0.5) < 1e-3);
         assert!(sigmoid(20.0) > 0.99);
         assert!(sigmoid(-20.0) < 0.01);
     }
@@ -271,7 +277,7 @@ mod tests {
         // With the LCG init the output weights must not all be identical.
         let w = net.get_output_weights();
         assert!(
-            w.iter().any(|&x| (x - w[0]).abs() > 1e-4),
+            w.iter().any(|&x| fabs(x - w[0]) > 1e-4),
             "output weights are degenerate/symmetric: {:?}",
             w
         );
@@ -285,11 +291,11 @@ mod tests {
         m.wait_time = 300;
         m.io_wait_count = 4;
         let target = 0.9;
-        let before = (target - net.predict_priority(&m)).abs();
+        let before = fabs(target - net.predict_priority(&m));
         for _ in 0..2000 {
             net.learn(&m, target);
         }
-        let after = (target - net.predict_priority(&m)).abs();
+        let after = fabs(target - net.predict_priority(&m));
         assert!(
             after < before,
             "SGD failed to reduce error: before={} after={}",

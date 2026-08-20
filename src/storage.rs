@@ -93,7 +93,7 @@ mod tests {
         for k in 0..32 {
             let (i, j) = (k / 7, k % 7);
             assert!(
-                (loaded[k] - w[i][j]).abs() < 1e-9,
+                crate::neural::fabs(loaded[k] - w[i][j]) < 1e-9,
                 "mismatch at {}: {} != {}",
                 k,
                 loaded[k],

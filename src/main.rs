@@ -72,10 +72,10 @@ fn print_float(f: f32, decimals: usize) {
     if int_part < 0 {
         putc(b'-');
     }
-    print_number(int_part.abs() as usize);
+    print_number(int_part.unsigned_abs() as usize);
     putc(b'.');
-    
-    let frac = ((f.abs() - (int_part.abs() as f32)) * 100.0) as usize;
+
+    let frac = ((neural::fabs(f) - (int_part.unsigned_abs() as f32)) * 100.0) as usize;
     if frac < 10 {
         putc(b'0');
     }
