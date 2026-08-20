@@ -1,4 +1,4 @@
-use crate::scheduler::{Scheduler, TaskState};
+use crate::scheduler::{Scheduler, TaskState, MAX_TASKS};
 use crate::neural::{NeuralScheduler, TaskMetrics, TaskClass};
 
 pub const METRICS_HISTORY_SIZE: usize = 128;
@@ -30,7 +30,7 @@ impl MetricsCollector {
     }
 
     pub fn get_average(&self, task_id: usize) -> Option<TaskMetrics> {
-        let mut count = 0;
+        let mut count: u32 = 0;
         let mut avg_exec = 0u32;
         let mut avg_wait = 0u32;
         let mut avg_mem = 0usize;
@@ -57,7 +57,7 @@ impl MetricsCollector {
                 task_id,
                 execution_time: avg_exec / count,
                 wait_time: avg_wait / count,
-                memory_used: avg_mem / count,
+                memory_used: avg_mem / count as usize,
                 ticks_since_run: avg_ticks / count,
                 io_wait_count: avg_io / count,
                 context_switches: avg_ctx / count,
@@ -93,18 +93,18 @@ pub struct AdaptiveScheduler {
     pub base_scheduler: Scheduler,
     pub neural: NeuralScheduler,
     pub metrics: MetricsCollector,
-    pub last_execution_tick: [u32; 4],
-    pub task_classes: [TaskClass; 4],
-    pub task_deadlines: [u32; 4],
-    pub execution_start_time: [u32; 4],
-    pub total_exec_time: [u32; 4],  // для fairness
+    pub last_execution_tick: [u32; MAX_TASKS],
+    pub task_classes: [TaskClass; MAX_TASKS],
+    pub task_deadlines: [u32; MAX_TASKS],
+    pub execution_start_time: [u32; MAX_TASKS],
+    pub total_exec_time: [u32; MAX_TASKS],  // для fairness
     
     // Статистика
     pub stats: OSStatistics,
     pub strategy: SchedulingStrategy,
     
     // Q-learning для reinforcement
-    pub q_values: [[f32; 4]; 4],  // [task][action]
+    pub q_values: [[f32; 4]; MAX_TASKS],  // [task][action]
     pub q_learning_rate: f32,
     pub q_discount: f32,
 }
@@ -115,11 +115,11 @@ impl AdaptiveScheduler {
             base_scheduler: Scheduler::new(),
             neural: NeuralScheduler::new(),
             metrics: MetricsCollector::new(),
-            last_execution_tick: [0; 4],
-            task_classes: [TaskClass::Batch; 4],
-            task_deadlines: [0; 4],
-            execution_start_time: [0; 4],
-            total_exec_time: [0; 4],
+            last_execution_tick: [0; MAX_TASKS],
+            task_classes: [TaskClass::Batch; MAX_TASKS],
+            task_deadlines: [0; MAX_TASKS],
+            execution_start_time: [0; MAX_TASKS],
+            total_exec_time: [0; MAX_TASKS],
             
             stats: OSStatistics {
                 total_context_switches: 0,
@@ -131,7 +131,7 @@ impl AdaptiveScheduler {
             },
             strategy: SchedulingStrategy::LoadBalanced,
             
-            q_values: [[0.0; 4]; 4],
+            q_values: [[0.0; 4]; MAX_TASKS],
             q_learning_rate: 0.1,
             q_discount: 0.9,
         }
@@ -139,9 +139,14 @@ impl AdaptiveScheduler {
 
     pub fn add_task(&mut self, id: usize, entry: fn(), task_class: TaskClass) {
         self.base_scheduler.add_task(id, entry);
-        if id > 0 && id <= 4 {
+        if id > 0 && id <= MAX_TASKS {
             self.task_classes[id - 1] = task_class;
         }
+    }
+
+    /// Grant a task (by id) an IPC capability on an endpoint.
+    pub fn grant_cap(&mut self, id: usize, endpoint: usize, rights: u8) {
+        self.base_scheduler.grant(id, endpoint, rights);
     }
 
     /// Load-balanced selection с fairness
@@ -153,7 +158,7 @@ impl AdaptiveScheduler {
         // Вычисляем среднее время выполнения
         let mut total_time = 0u32;
         let mut count = 0;
-        for i in 0..4 {
+        for i in 0..MAX_TASKS {
             if self.base_scheduler.tasks[i].is_some() {
                 total_time = total_time.saturating_add(self.total_exec_time[i]);
                 count += 1;
@@ -163,7 +168,7 @@ impl AdaptiveScheduler {
         let avg_time = if count > 0 { total_time / count } else { 1 };
         let fair_share = if count > 0 { 1.0 / (count as f32) } else { 0.25 };
 
-        for i in 0..4 {
+        for i in 0..MAX_TASKS {
             if let Some(task) = &self.base_scheduler.tasks[i] {
                 if task.state == TaskState::Ready {
                     let mut metrics = TaskMetrics::new(task.id);
@@ -240,7 +245,7 @@ impl AdaptiveScheduler {
     /// Q-learning с reward signal
     pub fn learn_with_reward(&mut self, signal: RewardSignal) {
         let task_idx = signal.task_id.saturating_sub(1);
-        if task_idx >= 4 {
+        if task_idx >= MAX_TASKS {
             return;
         }
         
@@ -268,7 +273,7 @@ impl AdaptiveScheduler {
         let current_tick = self.base_scheduler.tick as u32;
 
         // Обновляем deadlines
-        for i in 0..4 {
+        for i in 0..MAX_TASKS {
             if self.task_deadlines[i] > 0 {
                 self.task_deadlines[i] = self.task_deadlines[i].saturating_sub(1);
             }
@@ -279,7 +284,7 @@ impl AdaptiveScheduler {
             SchedulingStrategy::NeuralOnly => {
                 let mut best_priority = -1.0f32;
                 let mut best_idx = self.base_scheduler.current;
-                for i in 0..4 {
+                for i in 0..MAX_TASKS {
                     if let Some(task) = &self.base_scheduler.tasks[i] {
                         if task.state == TaskState::Ready {
                             let metrics = TaskMetrics::new(task.id);
@@ -304,14 +309,22 @@ impl AdaptiveScheduler {
         };
 
         // Переключаемся на выбранную задачу
-        if next_idx != self.base_scheduler.current {
-            if let (Some(old_task), Some(new_task)) = (
-                self.base_scheduler.tasks[self.base_scheduler.current].as_mut(),
-                self.base_scheduler.tasks[next_idx].as_mut(),
-            ) {
+        let cur = self.base_scheduler.current;
+        if next_idx != cur {
+            // Получаем два непересекающихся изменяемых ссылки на задачи
+            // (split_at_mut, т.к. индексировать массив дважды нельзя).
+            let (old_slot, new_slot) = if cur < next_idx {
+                let (left, right) = self.base_scheduler.tasks.split_at_mut(next_idx);
+                (&mut left[cur], &mut right[0])
+            } else {
+                let (left, right) = self.base_scheduler.tasks.split_at_mut(cur);
+                (&mut right[0], &mut left[next_idx])
+            };
+
+            if let (Some(old_task), Some(new_task)) = (old_slot.as_mut(), new_slot.as_mut()) {
                 // Обновляем статистику
-                let exec_time = current_tick.saturating_sub(self.execution_start_time[self.base_scheduler.current]);
-                self.total_exec_time[self.base_scheduler.current] = self.total_exec_time[self.base_scheduler.current].saturating_add(exec_time);
+                let exec_time = current_tick.saturating_sub(self.execution_start_time[cur]);
+                self.total_exec_time[cur] = self.total_exec_time[cur].saturating_add(exec_time);
                 
                 old_task.state = TaskState::Ready;
                 new_task.state = TaskState::Running;
@@ -349,7 +362,7 @@ impl AdaptiveScheduler {
         let mut total_wait = 0u32;
         let mut wait_count = 0;
         
-        for i in 0..4 {
+        for i in 0..MAX_TASKS {
             if self.base_scheduler.tasks[i].is_some() {
                 let wait = (self.base_scheduler.tick as u32).saturating_sub(self.last_execution_tick[i]);
                 total_wait = total_wait.saturating_add(wait);
@@ -366,7 +379,7 @@ impl AdaptiveScheduler {
         // Fairness index (Jain's fairness index)
         let mut sum_sq = 0.0;
         let mut sum = 0.0;
-        for i in 0..4 {
+        for i in 0..MAX_TASKS {
             if self.base_scheduler.tasks[i].is_some() {
                 let time = (self.total_exec_time[i] as f32).max(1.0);
                 sum_sq += time * time;
@@ -385,7 +398,7 @@ impl AdaptiveScheduler {
     }
 
     pub fn set_task_deadline(&mut self, task_id: usize, ticks: u32) {
-        if task_id > 0 && task_id <= 4 {
+        if task_id > 0 && task_id <= MAX_TASKS {
             self.task_deadlines[task_id - 1] = ticks;
         }
     }

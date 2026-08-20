@@ -1,61 +1,46 @@
 #!/bin/bash
+set -euo pipefail
 
-echo "🔨 Building Neural OS v0.9 - Full AI Orchestration Kernel..."
+echo "🔨 Building Neural OS v0.9 - Full AI Orchestration Kernel (bare-metal RISC-V)"
 
-mkdir -p build
+BUILD=build
+mkdir -p "$BUILD"
 
-echo "  → Assembling architecture files"
-riscv64-unknown-elf-as start.s -o build/start.o || exit 1
-riscv64-unknown-elf-as trap.s -o build/trap.o || exit 1
-riscv64-unknown-elf-as context_switch.s -o build/context_switch.o || exit 1
+AS=riscv64-unknown-elf-as
+LD=riscv64-unknown-elf-ld
+OBJCOPY=riscv64-unknown-elf-objcopy
+SIZE=riscv64-unknown-elf-size
 
-echo "  → Compiling Rust + AI modules"
-rustc --target riscv64gc-unknown-none-elf \
+echo "  → Assembling boot + trap vector"
+$AS -march=rv64gc -mabi=lp64d start.s -o "$BUILD/start.o"
+$AS -march=rv64gc -mabi=lp64d trap.s  -o "$BUILD/trap.o"
+
+echo "  → Compiling + linking Rust kernel (nightly, riscv64gc-unknown-none-elf)"
+# Let rustc drive the link so libcore / compiler_builtins are pulled in, but use
+# the RISC-V GNU linker with our linker script and the assembled boot objects.
+rustc +nightly --target riscv64gc-unknown-none-elf \
     -C panic=abort \
     -C opt-level=z \
     -A warnings \
-    --crate-type=lib \
-    --emit=obj \
-    src/main.rs \
-    -o build/main.o || exit 1
-
-if [ ! -f "build/main.o" ]; then
-    echo "❌ Rust compilation failed"
-    exit 1
-fi
-
-echo "  → Linking final kernel"
-riscv64-unknown-elf-ld -T linker.ld \
-    build/start.o \
-    build/trap.o \
-    build/context_switch.o \
-    build/main.o \
-    -o build/kernel.elf || exit 1
-
-if [ ! -f "build/kernel.elf" ]; then
-    echo "❌ Linking failed"
-    exit 1
-fi
+    -C linker="$LD" \
+    -C linker-flavor=ld \
+    -C link-arg=-Tlinker.ld \
+    -C link-arg="$BUILD/start.o" \
+    -C link-arg="$BUILD/trap.o" \
+    --crate-type=bin \
+    -o "$BUILD/kernel.elf" \
+    src/main.rs
 
 echo "  → Creating binary"
-riscv64-unknown-elf-objcopy -O binary build/kernel.elf build/os.bin || exit 1
+$OBJCOPY -O binary "$BUILD/kernel.elf" "$BUILD/os.bin"
 
 echo ""
 echo "✅ Build successful!"
 echo ""
 echo "📦 Kernel Statistics:"
-riscv64-unknown-elf-size build/kernel.elf
+$SIZE "$BUILD/kernel.elf"
 echo ""
 echo "Binary size:"
-ls -lh build/os.bin
+ls -lh "$BUILD/os.bin"
 echo ""
-echo "📊 Features compiled:"
-echo "   ✓ Multi-layer Neural Network (7→8→1)"
-echo "   ✓ Momentum-based SGD"
-echo "   ✓ Load Balancing with Fairness"
-echo "   ✓ Predictive Preemption"
-echo "   ✓ Real-time Priority Support"
-echo "   ✓ Q-Learning Reinforcement"
-echo "   ✓ Metrics Collection"
-echo "   ✓ Persistent Weight Storage"
-echo "   ✓ Live Statistics Monitor"
+echo "▶️  Run with: ./run.sh"

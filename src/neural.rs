@@ -82,14 +82,22 @@ impl NeuralScheduler {
             momentum: 0.9,
         };
         
-        // Инициализируем с малыми случайными значениями
+        // Инициализируем малыми ПСЕВДОСЛУЧАЙНЫМИ значениями (LCG).
+        // Важно: разные веса у разных нейронов ломают симметрию, иначе все
+        // веса обучаются синхронно и сеть не различает задачи.
+        let mut seed: u32 = 0x2545_f491;
+        let mut rand = || -> f32 {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            // (seed >> 9) занимает 23 бита -> [0, 1); масштабируем в [-1, 1)
+            ((seed >> 9) as f32 / 8_388_608.0) * 2.0 - 1.0
+        };
         for i in 0..HIDDEN_SIZE {
             for j in 0..INPUT_SIZE {
-                scheduler.hidden_weights[i][j] = 0.5 + (i as f32 * j as f32) % 0.1;
+                scheduler.hidden_weights[i][j] = 0.5 + 0.15 * rand();
             }
-            scheduler.output_weights[i] = 0.3 + (i as f32) % 0.1;
+            scheduler.output_weights[i] = 0.3 + 0.10 * rand();
         }
-        
+
         scheduler
     }
 
@@ -234,4 +242,59 @@ pub fn exp(x: f32) -> f32 {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sigmoid_is_bounded() {
+        assert!((sigmoid(0.0) - 0.5).abs() < 1e-3);
+        assert!(sigmoid(20.0) > 0.99);
+        assert!(sigmoid(-20.0) < 0.01);
+    }
+
+    #[test]
+    fn priority_stays_in_unit_interval() {
+        let net = NeuralScheduler::new();
+        let mut m = TaskMetrics::new(1);
+        m.execution_time = 900;
+        m.wait_time = 400;
+        let p = net.predict_priority(&m);
+        assert!((0.0..=1.0).contains(&p), "priority out of range: {}", p);
+    }
+
+    #[test]
+    fn weight_init_breaks_symmetry() {
+        let net = NeuralScheduler::new();
+        // With the LCG init the output weights must not all be identical.
+        let w = net.get_output_weights();
+        assert!(
+            w.iter().any(|&x| (x - w[0]).abs() > 1e-4),
+            "output weights are degenerate/symmetric: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn training_reduces_error() {
+        let mut net = NeuralScheduler::new();
+        let mut m = TaskMetrics::new(1);
+        m.execution_time = 500;
+        m.wait_time = 300;
+        m.io_wait_count = 4;
+        let target = 0.9;
+        let before = (target - net.predict_priority(&m)).abs();
+        for _ in 0..2000 {
+            net.learn(&m, target);
+        }
+        let after = (target - net.predict_priority(&m)).abs();
+        assert!(
+            after < before,
+            "SGD failed to reduce error: before={} after={}",
+            before,
+            after
+        );
+    }
 }

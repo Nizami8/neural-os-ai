@@ -35,35 +35,30 @@ impl PersistentStorage {
         }
     }
 
-    /// Восстанавливает веса из буфера
-    pub fn load_weights(&self) -> Option<(Vec<f32>, Vec<f32>)> {
-        // В реальности это сложнее, но для примера:
-        let mut weights = Vec::new();
-        let mut output_weights = Vec::new();
-        
+    /// Восстанавливает веса из буфера (no_std: фиксированные массивы вместо Vec)
+    pub fn load_weights(&self) -> Option<([f32; 56], [f32; 8])> {
+        let mut weights = [0.0f32; 56];   // 8×7 входных весов
+        let mut output_weights = [0.0f32; 8];
+
         let mut idx = 0;
-        
+
         // Загружаем входные веса
-        for _ in 0..56 {  // 8×7
+        for w in weights.iter_mut() {
             if idx < 32 {
-                weights.push(f32::from_bits(self.buffer[idx]));
+                *w = f32::from_bits(self.buffer[idx]);
                 idx += 1;
             }
         }
-        
+
         // Загружаем выходные веса
-        for _ in 0..8 {
+        for w in output_weights.iter_mut() {
             if idx < 32 {
-                output_weights.push(f32::from_bits(self.buffer[idx]));
+                *w = f32::from_bits(self.buffer[idx]);
                 idx += 1;
             }
         }
-        
-        if weights.len() > 0 && output_weights.len() > 0 {
-            Some((weights, output_weights))
-        } else {
-            None
-        }
+
+        Some((weights, output_weights))
     }
 
     /// Очищает хранилище
@@ -71,5 +66,49 @@ impl PersistentStorage {
         for i in 0..32 {
             self.buffer[i] = 0;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_load_roundtrip() {
+        let mut s = PersistentStorage::new();
+
+        let mut w = [[0.0f32; 7]; 8];
+        for i in 0..8 {
+            for j in 0..7 {
+                w[i][j] = (i * 7 + j) as f32 * 0.01;
+            }
+        }
+        let out = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8f32];
+
+        s.save_weights(&w, &out);
+        let (loaded, _) = s.load_weights().expect("load_weights returned None");
+
+        // The buffer holds 32 slots, so only the first 32 flattened hidden
+        // weights survive the round trip; check those bit-for-bit.
+        for k in 0..32 {
+            let (i, j) = (k / 7, k % 7);
+            assert!(
+                (loaded[k] - w[i][j]).abs() < 1e-9,
+                "mismatch at {}: {} != {}",
+                k,
+                loaded[k],
+                w[i][j]
+            );
+        }
+    }
+
+    #[test]
+    fn clear_zeroes_buffer() {
+        let mut s = PersistentStorage::new();
+        let w = [[1.0f32; 7]; 8];
+        let out = [1.0f32; 8];
+        s.save_weights(&w, &out);
+        s.clear();
+        assert!(s.buffer.iter().all(|&x| x == 0));
     }
 }
