@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install RISC-V toolchain + QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf \
+            qemu-system-misc
+          rustup toolchain install nightly --profile minimal --component rust-src --component clippy
+          rustup target add --toolchain nightly riscv64gc-unknown-none-elf
+
+      - name: Host unit tests
+        run: cargo +nightly test --target x86_64-unknown-linux-gnu
+
+      - name: Clippy (lib)
+        run: cargo +nightly clippy --lib --target x86_64-unknown-linux-gnu
+
+      - name: Build bare-metal kernel
+        run: ./build.sh
+
+      - name: QEMU smoke test
+        run: ./smoke-test.sh
