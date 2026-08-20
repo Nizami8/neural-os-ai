@@ -2,6 +2,7 @@
 #![no_main]
 
 mod scheduler;
+mod trapframe;
 mod trap;
 mod neural;
 mod adaptive;
@@ -115,7 +116,7 @@ fn task1() {
         puts("|RT] ");
         counter += 1;
 
-        for _ in 0..50 {
+        for _ in 0..2_000_000 {
             unsafe { core::arch::asm!("nop"); }
         }
     }
@@ -129,7 +130,7 @@ fn task2() {
         puts("|IO] ");
         counter += 1;
 
-        for _ in 0..75 {
+        for _ in 0..2_600_000 {
             unsafe { core::arch::asm!("nop"); }
         }
     }
@@ -143,7 +144,7 @@ fn task3() {
         puts("|BG] ");
         counter += 1;
 
-        for _ in 0..100 {
+        for _ in 0..3_200_000 {
             unsafe { core::arch::asm!("nop"); }
         }
     }
@@ -204,50 +205,43 @@ pub extern "C" fn rust_main() -> ! {
         ADAPTIVE_SCHED = Some(adaptive);
         USE_AI.store(1, Ordering::Relaxed);
 
-        init_timer();
-    }
-
-    // Главный loop с периодическим мониторингом
-    let mut stat_counter = 0;
-    loop {
-        unsafe {
-            core::arch::asm!("wfi");
-            
-            stat_counter += 1;
-            
-            // Каждые 1000 тиков выводим статистику
-            if stat_counter >= 1000 {
-                stat_counter = 0;
-                
-                if let Some(ref mut adaptive) = ADAPTIVE_SCHED {
-                    adaptive.collect_statistics();
-                    
-                    puts("\n");
-                    puts("📊 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ STATISTICS ━━━━━━━━\n");
-                    puts("   Context Switches: ");
-                    print_number(adaptive.stats.total_context_switches as usize);
-                    puts("\n");
-                    
-                    puts("   Avg Wait Time: ");
-                    print_float(adaptive.stats.avg_wait_time, 2);
-                    puts(" ticks\n");
-                    
-                    puts("   Fairness Index: ");
-                    print_float(adaptive.stats.fairness_index, 2);
-                    puts(" (1.0 = perfect)\n");
-                    
-                    puts("   Neural Output Weights: ");
-                    let w = adaptive.get_neural_weights();
-                    for i in 0..3 {
-                        print_float(w[i], 2);
-                        puts(", ");
-                    }
-                    print_float(w[3], 2);
-                    puts("\n");
-                    
-                    puts("────────────────────────────────────────────────────────\n\n");
-                }
+        // Point the current-task pointer at the first task, arm the timer, and
+        // hand control to the preemptive scheduler. Tasks now run for real and
+        // are preempted by the machine timer; start_scheduling never returns.
+        if let Some(ref mut a) = ADAPTIVE_SCHED {
+            if let Some(ref mut t0) = a.base_scheduler.tasks[0] {
+                trap::CURRENT_TF = &mut t0.tf as *mut _;
             }
         }
+        init_timer();
+        trap::start_scheduling();
     }
+}
+
+/// Print a live statistics block. Called from the timer trap handler.
+pub fn print_stats(adaptive: &adaptive::AdaptiveScheduler) {
+    puts("\n");
+    puts("📊 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ STATISTICS ━━━━━━━━\n");
+    puts("   Context Switches: ");
+    print_number(adaptive.stats.total_context_switches as usize);
+    puts("\n");
+
+    puts("   Avg Wait Time: ");
+    print_float(adaptive.stats.avg_wait_time, 2);
+    puts(" ticks\n");
+
+    puts("   Fairness Index: ");
+    print_float(adaptive.stats.fairness_index, 2);
+    puts(" (1.0 = perfect)\n");
+
+    puts("   Neural Output Weights: ");
+    let w = adaptive.get_neural_weights();
+    for i in 0..3 {
+        print_float(w[i], 2);
+        puts(", ");
+    }
+    print_float(w[3], 2);
+    puts("\n");
+
+    puts("────────────────────────────────────────────────────────\n\n");
 }

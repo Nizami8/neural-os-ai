@@ -2,11 +2,29 @@
 ///
 /// The adaptive (neural) scheduler in `adaptive.rs` sits on top of this and
 /// makes the scheduling *decisions* (which task should run next) using the MLP,
-/// fairness and Q-learning. Task selection here is cooperative: `context_switch`
-/// records the decision without performing a register-level stack switch, which
-/// keeps the kernel's monitoring loop alive so it can report live statistics.
+/// fairness and Q-learning. The actual switch is preemptive: every task owns a
+/// full `TrapFrame` and its own stack, and the timer trap vector saves/restores
+/// those frames (see `trap.s` / `src/trap.rs`).
+
+use crate::trapframe::{TrapFrame, MSTATUS_INIT};
 
 pub const MAX_TASKS: usize = 4;
+
+/// Per-task stack size (16 KiB). Task code is tiny; the neural scheduler runs on
+/// the separate kernel stack inside the trap handler.
+pub const TASK_STACK_SIZE: usize = 16 * 1024;
+
+#[repr(C, align(16))]
+struct TaskStack([u8; TASK_STACK_SIZE]);
+
+static mut TASK_STACKS: [TaskStack; MAX_TASKS] =
+    [const { TaskStack([0; TASK_STACK_SIZE]) }; MAX_TASKS];
+
+/// Top-of-stack address (16-byte aligned) for task slot `i`.
+fn stack_top(i: usize) -> usize {
+    let base = unsafe { core::ptr::addr_of!(TASK_STACKS[i]) as usize };
+    (base + TASK_STACK_SIZE) & !0xF
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum TaskState {
@@ -38,6 +56,8 @@ pub struct Task {
     pub entry: fn(),
     pub state: TaskState,
     pub context: Context,
+    /// Full saved register state; the timer trap vector switches through this.
+    pub tf: TrapFrame,
 }
 
 pub struct Scheduler {
@@ -63,11 +83,20 @@ impl Scheduler {
                 } else {
                     TaskState::Ready
                 };
+
+                // Prime the task's TrapFrame so the first mret enters `entry`
+                // on the task's own stack with interrupts + FPU enabled.
+                let mut tf = TrapFrame::zero();
+                tf.regs[2] = stack_top(i); // sp
+                tf.mepc = entry as usize; // resume PC
+                tf.mstatus = MSTATUS_INIT;
+
                 self.tasks[i] = Some(Task {
                     id,
                     entry,
                     state,
                     context: Context::new(),
+                    tf,
                 });
                 return;
             }
@@ -75,9 +104,10 @@ impl Scheduler {
     }
 }
 
-/// Record a scheduling decision. Cooperative: the running kernel thread keeps
-/// executing, so the monitoring loop can print statistics between timer ticks.
+/// Kept for source compatibility with the adaptive scheduler's decision path.
+/// The real register-level switch now happens in the timer trap vector via each
+/// task's `TrapFrame`, so this is a no-op.
 ///
 /// # Safety
-/// Takes raw context handles for parity with a real register-level switch.
+/// Takes raw context handles for parity with a register-level switch.
 pub unsafe fn context_switch(_old: &mut Context, _new: &mut Context) {}
