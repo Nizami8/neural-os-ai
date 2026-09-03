@@ -4,8 +4,7 @@ version = "0.9.0"
 edition = "2021"
 description = "Self-learning bare-metal RISC-V kernel with a neural adaptive scheduler"
 # The bare-metal kernel is built via ./build.sh (rustc on src/main.rs). Cargo is
-# used only for host-side unit testing of the pure logic modules, exposed as a
-# library, so disable auto target discovery of the kernel/bin/example sources.
+# used for host-side unit tests and the Milk-V Linux userspace binary.
 autobins = false
 autoexamples = false
 autotests = false
@@ -14,6 +13,15 @@ autobenches = false
 [lib]
 name = "neural_os"
 path = "src/lib.rs"
+
+[[bin]]
+name = "milkv-userspace"
+path = "src/bin/milkv-userspace.rs"
+required-features = ["milkv"]
+
+[features]
+default = []
+milkv = []
 
 [profile.release]
 panic = "abort"

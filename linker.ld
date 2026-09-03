@@ -42,6 +42,15 @@ SECTIONS
     . += 0x20000;
     _heap_end = .;
 
+    /* Durable neural-weight store. NOLOAD: not zeroed with BSS, so a soft
+     * reset that preserves RAM can restore previously learned weights. */
+    . = ALIGN(16);
+    .persist (NOLOAD) : {
+        _persist_start = .;
+        *(.persist)
+        _persist_end = .;
+    }
+
     /DISCARD/ : {
         *(.eh_frame)
         *(.comment)

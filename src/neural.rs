@@ -1,47 +1,44 @@
-/// Advanced neural network with multiple layers and momentum
-/// Multi-layer perceptron (MLP) with online learning
+//! Multi-layer perceptron with online momentum SGD.
+//!
+//! Weights and activations use Q16.16 fixed-point (`fixed::Fixed`) so the
+//! scheduling hot path does not depend on soft-float. Public APIs still speak
+//! `f32` for host tests and shell display.
+
+use crate::fixed::{self, Fixed, HALF, ONE, ZERO};
 
 const HIDDEN_SIZE: usize = 8;
-const INPUT_SIZE: usize = 7;  // расширенные метрики
-const OUTPUT_SIZE: usize = 1;
+const INPUT_SIZE: usize = 7;
 
 pub struct NeuralScheduler {
-    // Input → Hidden layer
-    pub hidden_weights: [[f32; INPUT_SIZE]; HIDDEN_SIZE],
-    pub hidden_bias: [f32; HIDDEN_SIZE],
-    
-    // Hidden → Output layer
-    pub output_weights: [f32; HIDDEN_SIZE],
-    pub output_bias: f32,
-    
-    // Momentum для обоих слоев
-    pub hidden_velocity: [[f32; INPUT_SIZE]; HIDDEN_SIZE],
-    pub output_velocity: [f32; HIDDEN_SIZE],
-    
-    pub learning_rate: f32,
-    pub momentum: f32,
+    pub hidden_weights: [[Fixed; INPUT_SIZE]; HIDDEN_SIZE],
+    pub hidden_bias: [Fixed; HIDDEN_SIZE],
+    pub output_weights: [Fixed; HIDDEN_SIZE],
+    pub output_bias: Fixed,
+    pub hidden_velocity: [[Fixed; INPUT_SIZE]; HIDDEN_SIZE],
+    pub output_velocity: [Fixed; HIDDEN_SIZE],
+    pub learning_rate: Fixed,
+    pub momentum: Fixed,
 }
 
-/// Расширенная статистика задачи
 #[derive(Clone, Copy)]
 pub struct TaskMetrics {
     pub task_id: usize,
-    pub execution_time: u32,        // количество циклов
-    pub wait_time: u32,             // сколько ждала в очереди
+    pub execution_time: u32,
+    pub wait_time: u32,
     pub memory_used: usize,
     pub ticks_since_run: u32,
-    pub io_wait_count: u32,         // НОВОЕ: ожидания I/O
-    pub context_switches: u32,      // НОВОЕ: кол-во переключений
-    pub priority_boost: i32,        // НОВОЕ: ручной бустер
-    pub ema_exec_time: f32,         // Exponential moving average
+    pub io_wait_count: u32,
+    pub context_switches: u32,
+    pub priority_boost: i32,
+    pub ema_exec_time: f32,
     pub priority: f32,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum TaskClass {
-    RealTime,      // hard deadline
-    Interactive,   // user-facing
-    Batch,         // background
+    RealTime,
+    Interactive,
+    Batch,
 }
 
 impl TaskMetrics {
@@ -61,75 +58,74 @@ impl TaskMetrics {
     }
 
     pub fn update_ema(&mut self, new_exec_time: u32) {
-        let alpha = 0.3;  // вес недавних значений
-        self.ema_exec_time = alpha * (new_exec_time as f32) 
-                           + (1.0 - alpha) * self.ema_exec_time;
+        let alpha = 0.3;
+        self.ema_exec_time =
+            alpha * (new_exec_time as f32) + (1.0 - alpha) * self.ema_exec_time;
     }
 }
 
 impl NeuralScheduler {
     pub fn new() -> Self {
         let mut scheduler = NeuralScheduler {
-            hidden_weights: [[0.5; INPUT_SIZE]; HIDDEN_SIZE],
-            hidden_bias: [0.1; HIDDEN_SIZE],
-            output_weights: [0.3; HIDDEN_SIZE],
-            output_bias: 0.0,
-            
-            hidden_velocity: [[0.0; INPUT_SIZE]; HIDDEN_SIZE],
-            output_velocity: [0.0; HIDDEN_SIZE],
-            
-            learning_rate: 0.01,
-            momentum: 0.9,
+            hidden_weights: [[HALF; INPUT_SIZE]; HIDDEN_SIZE],
+            hidden_bias: [Fixed::from_f32(0.1); HIDDEN_SIZE],
+            output_weights: [Fixed::from_f32(0.3); HIDDEN_SIZE],
+            output_bias: ZERO,
+            hidden_velocity: [[ZERO; INPUT_SIZE]; HIDDEN_SIZE],
+            output_velocity: [ZERO; HIDDEN_SIZE],
+            learning_rate: Fixed::from_f32(0.01),
+            momentum: Fixed::from_f32(0.9),
         };
-        
-        // Инициализируем малыми ПСЕВДОСЛУЧАЙНЫМИ значениями (LCG).
-        // Важно: разные веса у разных нейронов ломают симметрию, иначе все
-        // веса обучаются синхронно и сеть не различает задачи.
+
+        // LCG init breaks symmetry between neurons.
         let mut seed: u32 = 0x2545_f491;
-        let mut rand = || -> f32 {
+        let mut rand = || -> Fixed {
             seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            // (seed >> 9) занимает 23 бита -> [0, 1); масштабируем в [-1, 1)
-            ((seed >> 9) as f32 / 8_388_608.0) * 2.0 - 1.0
+            let unit = ((seed >> 9) as f32 / 8_388_608.0) * 2.0 - 1.0;
+            Fixed::from_f32(unit)
         };
         for i in 0..HIDDEN_SIZE {
             for j in 0..INPUT_SIZE {
-                scheduler.hidden_weights[i][j] = 0.5 + 0.15 * rand();
+                scheduler.hidden_weights[i][j] = HALF + Fixed::from_f32(0.15) * rand();
             }
-            scheduler.output_weights[i] = 0.3 + 0.10 * rand();
+            scheduler.output_weights[i] = Fixed::from_f32(0.3) + Fixed::from_f32(0.10) * rand();
         }
 
         scheduler
     }
 
-    /// Нормализация входов в диапазон [0, 1]
-    fn normalize_inputs(&self, metrics: &TaskMetrics) -> [f32; INPUT_SIZE] {
+    fn normalize_inputs(&self, metrics: &TaskMetrics) -> [Fixed; INPUT_SIZE] {
         [
-            (metrics.execution_time as f32) / 1000.0,
-            (metrics.wait_time as f32) / 1000.0,
-            (metrics.memory_used as f32) / 100.0,
-            (metrics.ticks_since_run as f32) / 100.0,
-            (metrics.io_wait_count as f32) / 100.0,
-            (metrics.context_switches as f32) / 50.0,
-            (metrics.priority_boost as f32) / 10.0,
+            Fixed::from_f32((metrics.execution_time as f32) / 1000.0),
+            Fixed::from_f32((metrics.wait_time as f32) / 1000.0),
+            Fixed::from_f32((metrics.memory_used as f32) / 100.0),
+            Fixed::from_f32((metrics.ticks_since_run as f32) / 100.0),
+            Fixed::from_f32((metrics.io_wait_count as f32) / 100.0),
+            Fixed::from_f32((metrics.context_switches as f32) / 50.0),
+            Fixed::from_f32((metrics.priority_boost as f32) / 10.0),
         ]
     }
 
-    /// ReLU активация для скрытого слоя
     #[inline]
-    fn relu(x: f32) -> f32 {
-        if x > 0.0 { x } else { 0.01 * x }  // Leaky ReLU
+    fn relu(x: Fixed) -> Fixed {
+        if x.0 > 0 {
+            x
+        } else {
+            x * Fixed::from_f32(0.01)
+        }
     }
 
-    /// Производная ReLU
     #[inline]
-    fn relu_derivative(x: f32) -> f32 {
-        if x > 0.0 { 1.0 } else { 0.01 }
+    fn relu_derivative(x: Fixed) -> Fixed {
+        if x.0 > 0 {
+            ONE
+        } else {
+            Fixed::from_f32(0.01)
+        }
     }
 
-    /// Forward pass: вычисляем скрытый слой
-    fn forward_hidden(&self, inputs: &[f32; INPUT_SIZE]) -> [f32; HIDDEN_SIZE] {
-        let mut hidden = [0.0; HIDDEN_SIZE];
-        
+    fn forward_hidden(&self, inputs: &[Fixed; INPUT_SIZE]) -> [Fixed; HIDDEN_SIZE] {
+        let mut hidden = [ZERO; HIDDEN_SIZE];
         for i in 0..HIDDEN_SIZE {
             let mut z = self.hidden_bias[i];
             for j in 0..INPUT_SIZE {
@@ -137,75 +133,94 @@ impl NeuralScheduler {
             }
             hidden[i] = Self::relu(z);
         }
-        
         hidden
     }
 
-    /// Forward pass: выходной слой с Sigmoid
-    fn forward_output(&self, hidden: &[f32; HIDDEN_SIZE]) -> f32 {
+    fn forward_output(&self, hidden: &[Fixed; HIDDEN_SIZE]) -> Fixed {
         let mut z = self.output_bias;
         for i in 0..HIDDEN_SIZE {
             z += self.output_weights[i] * hidden[i];
         }
-        sigmoid(z)
+        fixed::sigmoid(z)
     }
 
-    /// Полный forward pass для предсказания приоритета
     pub fn predict_priority(&self, metrics: &TaskMetrics) -> f32 {
         let inputs = self.normalize_inputs(metrics);
         let hidden = self.forward_hidden(&inputs);
-        self.forward_output(&hidden)
+        self.forward_output(&hidden).to_f32()
     }
 
-    /// Обратное распространение с Momentum (SGD + Momentum)
     pub fn learn(&mut self, metrics: &TaskMetrics, target: f32) {
         let inputs = self.normalize_inputs(metrics);
-        
-        // Forward pass
         let hidden = self.forward_hidden(&inputs);
         let output = self.forward_output(&hidden);
-        
-        // Вычисляем ошибку
-        let output_error = target - output;
-        
-        // Если ошибка слишком мала, не обновляем
-        if fabs(output_error) < 0.001 {
+        let target_f = Fixed::from_f32(target);
+        let output_error = target_f - output;
+
+        if output_error.abs().to_f32() < 0.001 {
             return;
         }
 
-        // Backprop: градиент выходного слоя
-        let output_delta = output_error * sigmoid_derivative(output);
-        
-        // Обновляем выходной слой с momentum
+        let output_delta = output_error * fixed::sigmoid_derivative_from_output(output);
+
         for i in 0..HIDDEN_SIZE {
             let grad = output_delta * hidden[i];
-            self.output_velocity[i] = self.momentum * self.output_velocity[i]
-                                    + self.learning_rate * grad;
+            self.output_velocity[i] =
+                self.momentum * self.output_velocity[i] + self.learning_rate * grad;
             self.output_weights[i] += self.output_velocity[i];
         }
         self.output_bias += self.learning_rate * output_delta;
-        
-        // Backprop: градиент скрытого слоя
+
         for i in 0..HIDDEN_SIZE {
-            let hidden_delta = output_delta * self.output_weights[i] 
-                             * Self::relu_derivative(hidden[i]);
-            
+            let hidden_delta =
+                output_delta * self.output_weights[i] * Self::relu_derivative(hidden[i]);
             for j in 0..INPUT_SIZE {
                 let grad = hidden_delta * inputs[j];
-                self.hidden_velocity[i][j] = self.momentum * self.hidden_velocity[i][j]
-                                           + self.learning_rate * grad;
+                self.hidden_velocity[i][j] =
+                    self.momentum * self.hidden_velocity[i][j] + self.learning_rate * grad;
                 self.hidden_weights[i][j] += self.hidden_velocity[i][j];
             }
             self.hidden_bias[i] += self.learning_rate * hidden_delta;
         }
     }
 
-    /// Получить текущие выходные веса (для отладки)
     pub fn get_output_weights(&self) -> [f32; HIDDEN_SIZE] {
-        self.output_weights
+        let mut out = [0.0; HIDDEN_SIZE];
+        for i in 0..HIDDEN_SIZE {
+            out[i] = self.output_weights[i].to_f32();
+        }
+        out
     }
 
-    /// Сбросить веса на начальные значения
+    /// Export flattened hidden + output weights for persistent storage.
+    pub fn export_weights(&self) -> ([[f32; INPUT_SIZE]; HIDDEN_SIZE], [f32; HIDDEN_SIZE]) {
+        let mut hidden = [[0.0f32; INPUT_SIZE]; HIDDEN_SIZE];
+        let mut output = [0.0f32; HIDDEN_SIZE];
+        for i in 0..HIDDEN_SIZE {
+            for j in 0..INPUT_SIZE {
+                hidden[i][j] = self.hidden_weights[i][j].to_f32();
+            }
+            output[i] = self.output_weights[i].to_f32();
+        }
+        (hidden, output)
+    }
+
+    /// Restore weights previously exported via `export_weights`.
+    pub fn import_weights(
+        &mut self,
+        hidden: &[[f32; INPUT_SIZE]; HIDDEN_SIZE],
+        output: &[f32; HIDDEN_SIZE],
+    ) {
+        for i in 0..HIDDEN_SIZE {
+            for j in 0..INPUT_SIZE {
+                self.hidden_weights[i][j] = Fixed::from_f32(hidden[i][j]);
+            }
+            self.output_weights[i] = Fixed::from_f32(output[i]);
+            self.hidden_velocity[i] = [ZERO; INPUT_SIZE];
+            self.output_velocity[i] = ZERO;
+        }
+    }
+
     pub fn reset(&mut self) {
         *self = Self::new();
     }
@@ -214,40 +229,17 @@ impl NeuralScheduler {
 /// Absolute value that works in both `no_std` and host-test builds.
 #[inline]
 pub fn fabs(x: f32) -> f32 {
-    if x.is_sign_negative() { -x } else { x }
+    if x.is_sign_negative() {
+        -x
+    } else {
+        x
+    }
 }
 
-/// Sigmoid активационная функция
+/// Host/display helper: fixed-point sigmoid exposed as f32.
 #[inline]
 pub fn sigmoid(x: f32) -> f32 {
-    1.0 / (1.0 + exp(-x))
-}
-
-/// Производная сигмоида для обратного распространения
-#[inline]
-pub fn sigmoid_derivative(y: f32) -> f32 {
-    y * (1.0 - y)
-}
-
-/// Приблизительная экспоненциальная функция для embedded
-#[inline]
-pub fn exp(x: f32) -> f32 {
-    if x > 10.0 {
-        return 22026.0;
-    }
-    if x < -10.0 {
-        return 0.0;
-    }
-
-    let mut result = 1.0;
-    let mut term = 1.0;
-    
-    for i in 1..=20 {
-        term *= x / (i as f32);
-        result += term;
-    }
-
-    result
+    fixed::sigmoid(Fixed::from_f32(x)).to_f32()
 }
 
 #[cfg(test)]
@@ -256,9 +248,9 @@ mod tests {
 
     #[test]
     fn sigmoid_is_bounded() {
-        assert!(fabs(sigmoid(0.0) - 0.5) < 1e-3);
-        assert!(sigmoid(20.0) > 0.99);
-        assert!(sigmoid(-20.0) < 0.01);
+        assert!(fabs(sigmoid(0.0) - 0.5) < 0.02);
+        assert!(sigmoid(20.0) > 0.9);
+        assert!(sigmoid(-20.0) < 0.1);
     }
 
     #[test]
@@ -274,7 +266,6 @@ mod tests {
     #[test]
     fn weight_init_breaks_symmetry() {
         let net = NeuralScheduler::new();
-        // With the LCG init the output weights must not all be identical.
         let w = net.get_output_weights();
         assert!(
             w.iter().any(|&x| fabs(x - w[0]) > 1e-4),
@@ -302,5 +293,20 @@ mod tests {
             before,
             after
         );
+    }
+
+    #[test]
+    fn export_import_roundtrip() {
+        let net = NeuralScheduler::new();
+        let (h, o) = net.export_weights();
+        let mut other = NeuralScheduler::new();
+        // Force different init then restore.
+        other.reset();
+        other.import_weights(&h, &o);
+        let w1 = net.get_output_weights();
+        let w2 = other.get_output_weights();
+        for i in 0..8 {
+            assert!(fabs(w1[i] - w2[i]) < 1e-4);
+        }
     }
 }

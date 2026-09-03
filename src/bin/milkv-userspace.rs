@@ -1,104 +1,60 @@
-#![cfg_attr(not(test), no_std)]
-#![cfg_attr(not(test), no_main)]
+//! Milk-V Duo userspace demo.
+//!
+//! Runs the shared neural scheduler library under Linux (glibc) on the board.
+//! This is not the bare-metal kernel — it validates that the MLP + storage
+//! modules work on the Duo's RISC-V Linux userspace.
 
-mod scheduler;
-mod trap;
-mod neural;
-mod adaptive;
+use neural_os::neural::{NeuralScheduler, TaskClass, TaskMetrics};
+use neural_os::storage::PersistentStorage;
+use std::thread;
+use std::time::Duration;
 
-use adaptive::AdaptiveScheduler;
-use neural::TaskClass;
-
-#[cfg(test)]
-fn main() {}
-
-#[cfg(not(test))]
-#[no_mangle]
-pub extern "C" fn main() -> i32 {
-    println!("\n🤖 Neural OS v0.9 - Milk-V Duo 256M Optimized");
+fn main() {
+    println!("\n🤖 Neural OS v0.9 - Milk-V Duo userspace");
     println!("═══════════════════════════════════════");
 
-    let mut adaptive = AdaptiveScheduler::new();
+    let mut net = NeuralScheduler::new();
+    let mut storage = PersistentStorage::new();
 
-    println!("📊 Initializing 2-core scheduler...");
-    println!("   Memory: 256 MB");
-    println!("   History: 32 samples (optimized)");
-    
-    // Добавляем 2 задачи (max для 256MB)
-    adaptive.add_task(1, task1, TaskClass::RealTime);
-    adaptive.add_task(2, task2, TaskClass::Batch);
+    if let Some((h, o)) = storage.load_weights() {
+        net.import_weights(&h, &o);
+        println!("💾 Restored persisted weights");
+    } else {
+        println!("💾 Fresh network (no persisted weights)");
+    }
 
-    println!("🧠 MLP Network: 7→8→1");
-    println!("   Momentum SGD enabled");
-    
-    println!("⏱️  Starting 10ms quantum timers...");
-    println!("═══════════════════════════════════════\n");
+    println!("🧠 MLP 7→8→1 (Q16.16 fixed-point)");
+    println!("   Classes: {:?} / {:?}", TaskClass::RealTime, TaskClass::Batch);
+    println!("⏱️  Running online learning demo...\n");
 
-    // Эмулируем scheduler в цикле
-    let mut tick = 0;
-    let mut stat_counter = 0;
-    
+    let mut tick = 0u32;
     loop {
-        // Симулируем tick каждую миллисекунду
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        tick += 1;
-        stat_counter += 1;
-        
-        // Каждые 500 тиков выводим статистику
-        if stat_counter >= 500 {
-            stat_counter = 0;
-            adaptive.collect_statistics();
-            
-            println!("\n📊 Statistics (tick={}):", tick);
-            println!("   Context Switches: {}", adaptive.stats.total_context_switches);
-            println!("   Avg Wait Time: {:.2} ticks", adaptive.stats.avg_wait_time);
-            println!("   Fairness Index: {:.2}", adaptive.stats.fairness_index);
-            
-            let weights = adaptive.get_neural_weights();
-            print!("   Neural Weights: ");
-            for (i, w) in weights.iter().take(4).enumerate() {
-                if i > 0 { print!(", "); }
-                print!("{:.3}", w);
+        tick = tick.wrapping_add(1);
+
+        for (id, wait) in [(1u32, 80u32), (2, 20), (3, 120)] {
+            let mut m = TaskMetrics::new(id as usize);
+            m.execution_time = 100 + (tick % 50);
+            m.wait_time = wait + (tick % 10);
+            m.ticks_since_run = m.wait_time;
+            let p = net.predict_priority(&m);
+            let target = if m.wait_time > 50 { 0.9 } else { 0.5 };
+            net.learn(&m, target);
+            if tick % 200 == 0 {
+                println!("[tick={tick}] task={id} priority={p:.3} target={target:.1}");
             }
-            println!();
+        }
+
+        if tick % 500 == 0 {
+            let (h, o) = net.export_weights();
+            storage.save_weights(&h, &o);
+            let w = net.get_output_weights();
+            println!(
+                "📊 persisted weights: {:.3}, {:.3}, {:.3}, {:.3}",
+                w[0], w[1], w[2], w[3]
+            );
             println!("═══════════════════════════════════════\n");
         }
-    }
-}
 
-fn task1() {
-    let mut counter = 0u64;
-    loop {
-        print!("[T1:{}", counter);
-        print!("]");
-        counter += 1;
-        
-        // Небольшая работа
-        for _ in 0..50 {
-            core::arch::asm!("nop");
-        }
-    }
-}
-
-fn task2() {
-    let mut counter = 0u64;
-    loop {
-        print!("[T2:{}", counter);
-        print!("]");
-        counter += 1;
-        
-        for _ in 0..100 {
-            core::arch::asm!("nop");
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_memory_footprint() {
-        assert!(std::mem::size_of::<AdaptiveScheduler>() < 1024 * 256);
+        thread::sleep(Duration::from_millis(2));
     }
 }

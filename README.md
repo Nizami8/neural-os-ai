@@ -9,7 +9,9 @@ syscalls, capability-gated IPC, and an interactive UART shell.
 |-------|---------|--------|
 | Boot | `start.s` + `linker.ld` + CLINT timer | Done |
 | 2 | Preemptive multitasking (TrapFrame + per-task stacks) | Done |
-| AI | MLP 7→8→1 + momentum SGD, load balancing, Q-learning | Done |
+| AI | MLP 7→8→1 (Q16.16) + momentum SGD, load balancing, Q-learning | Done |
+| Persist | `.persist` NOLOAD + magic/checksum weight restore | Done |
+| Safety | `KernelCell` for interrupt-safe kernel globals | Done |
 | 3 | Syscalls via `ecall` (`YIELD`, `GETPID`, `PRINT`, `EXIT`, …) | Done |
 | 4 | Synchronous IPC + `CAP_SEND` / `CAP_RECV` | Done |
 | Shell | Interactive UART CLI: `help`, `ps`, `stats`, `nn` | Done |
@@ -84,7 +86,7 @@ PASS: boot + preemption + syscalls + IPC + capabilities + interactive shell all 
 
 ### Neural scheduler
 
-- **MLP**: Input(7) → Hidden(8, Leaky ReLU) → Output(1, Sigmoid)
+- **MLP**: Input(7) → Hidden(8, Leaky ReLU) → Output(1, Sigmoid), Q16.16 fixed-point core
 - **Optimizer**: SGD + momentum (α=0.01, β=0.9)
 - **Task classes**: RealTime / Interactive / Batch
 - **Fairness**: Jain’s index + hog penalty
@@ -111,10 +113,12 @@ PASS: boot + preemption + syscalls + IPC + capabilities + interactive shell all 
 | `src/trapframe.rs` | RV64 machine-mode frame |
 | `src/syscall.rs` | Syscall numbers + wrappers |
 | `src/ipc.rs` | Endpoints + capabilities |
-| `src/neural.rs` | MLP + momentum SGD |
+| `src/neural.rs` | MLP + momentum SGD (Q16.16 fixed-point core) |
+| `src/fixed.rs` | Q16.16 arithmetic for the NN hot path |
+| `src/kcell.rs` | `KernelCell` — interrupt-safe globals (replaces `static mut`) |
 | `src/adaptive.rs` | AI scheduler + Q-learning |
-| `src/storage.rs` | Weight save/load buffer |
-| `start.s` / `linker.ld` | Boot + memory map |
+| `src/storage.rs` | Weight save/load via `.persist` (magic + checksum) |
+| `start.s` / `linker.ld` | Boot + memory map (incl. `.persist` NOLOAD) |
 | `build.sh` / `run.sh` / `smoke-test.sh` | Build, QEMU, CI smoke |
 | `.cursor/install.sh` | Cloud Agent RISC-V toolchain bootstrap |
 | `build-milkv.sh` / `deploy-milkv.sh` | Milk-V Duo userspace path |
@@ -144,11 +148,13 @@ See `MILKV-DEPLOYMENT.md` and `docs/MILKV-GUIDE.md`. Protect root SSH (password 
 
 ## Next steps
 
-- [ ] Reduce `static mut` kernel globals
-- [ ] Fixed-point NN (no FPU dependency)
-- [ ] Real flash/EEPROM persistence for `storage.rs`
+- [x] Replace `static mut` kernel globals with `KernelCell`
+- [x] Fixed-point NN core (Q16.16); public API still `f32` for host tests
+- [x] `.persist` section + magic/checksum weight restore across soft resets
+- [x] Milk-V Duo userspace binary rebuilt against shared `neural_os` lib
+- [ ] Back `.persist` with real flash/EEPROM on Milk-V hardware
+- [ ] Drop remaining `f32` from adaptive/Q-learning path (full no-FPU)
 - [ ] Richer capability model (beyond IPC endpoints)
-- [ ] Re-validate Milk-V Duo userspace against current modules
 - [ ] Multi-core / energy-aware / deeper RL (research)
 
 ## References

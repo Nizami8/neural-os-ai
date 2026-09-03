@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+mod kcell;
+mod fixed;
 mod scheduler;
 mod trapframe;
 mod trap;
@@ -10,7 +12,8 @@ mod neural;
 mod adaptive;
 mod storage;
 
-use scheduler::{Scheduler, TaskState};
+use kcell::KernelCell;
+use scheduler::TaskState;
 use trap::init_timer;
 use adaptive::{AdaptiveScheduler, SchedulingStrategy, RewardSignal};
 use neural::TaskClass;
@@ -19,10 +22,10 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 const UART: *mut u8 = 0x10000000 as *mut u8;
 
-pub static mut SCHED: Scheduler = Scheduler::new();
-pub static mut ADAPTIVE_SCHED: Option<AdaptiveScheduler> = None;
-pub static mut STORAGE: Option<PersistentStorage> = None;
-static TICK_COUNTER: AtomicUsize = AtomicUsize::new(0);
+/// Global adaptive scheduler. Accessed from the trap handler with interrupts
+/// masked; wrapped in `KernelCell` instead of `static mut`.
+pub static ADAPTIVE_SCHED: KernelCell<Option<AdaptiveScheduler>> = KernelCell::new(None);
+pub static STORAGE: KernelCell<Option<PersistentStorage>> = KernelCell::new(None);
 static USE_AI: AtomicUsize = AtomicUsize::new(0);
 
 fn putc(c: u8) {
@@ -258,19 +261,26 @@ pub extern "C" fn rust_main() -> ! {
     puts("\n");
     puts("╔═══════════════════════════════════════════════════════════╗\n");
     puts("║   🤖 Neural OS v0.9 - Full AI Orchestration Kernel     ║\n");
-    puts("║   • MLP with Momentum SGD                               ║\n");
+    puts("║   • MLP with Momentum SGD (Q16.16 fixed-point)          ║\n");
     puts("║   • Load Balancing + Fairness                           ║\n");
     puts("║   • Predictive Preemption + Q-Learning                 ║\n");
-    puts("║   • Real-time Priority + Persistent Memory             ║\n");
+    puts("║   • Syscalls + IPC capabilities + UART shell           ║\n");
+    puts("║   • Persistent neural weights (.persist)               ║\n");
     puts("╚═══════════════════════════════════════════════════════════╝\n");
     puts("\n");
 
     unsafe {
         let mut adaptive = AdaptiveScheduler::new();
-        
-        // Инициализируем storage для сохранения весов
-        let storage = PersistentStorage::new();
-        STORAGE = Some(storage);
+
+        // Restore previously learned weights from the durable .persist section.
+        let mut storage = PersistentStorage::new();
+        if let Some((hidden, output)) = storage.load_weights() {
+            adaptive.neural.import_weights(&hidden, &output);
+            puts("💾 Restored neural weights from persistent storage\n");
+        } else {
+            puts("💾 No persisted weights; starting with fresh network\n");
+        }
+        *STORAGE.as_mut() = Some(storage);
 
         puts("📊 Initializing advanced scheduler...\n");
         
@@ -287,7 +297,7 @@ pub extern "C" fn rust_main() -> ! {
         adaptive.grant_cap(5, DEMO_ENDPOINT, ipc::CAP_SEND);
         adaptive.grant_cap(6, DEMO_ENDPOINT, ipc::CAP_RECV);
 
-        puts("🧠 Neural network initialized (MLP 7→8→1)\n");
+        puts("🧠 Neural network initialized (MLP 7→8→1, Q16.16 fixed-point)\n");
         puts("   Architecture: Input(7) → Hidden(8, ReLU) → Output(1, Sigmoid)\n");
         puts("   Optimizer: SGD with Momentum (α=0.01, β=0.9)\n");
         
@@ -311,15 +321,15 @@ pub extern "C" fn rust_main() -> ! {
         puts("\n⏳ Starting with 10ms quantum timers...\n");
         puts("────────────────────────────────────────────────────────\n\n");
 
-        ADAPTIVE_SCHED = Some(adaptive);
+        *ADAPTIVE_SCHED.as_mut() = Some(adaptive);
         USE_AI.store(1, Ordering::Relaxed);
 
         // Point the current-task pointer at the first task, arm the timer, and
         // hand control to the preemptive scheduler. Tasks now run for real and
         // are preempted by the machine timer; start_scheduling never returns.
-        if let Some(ref mut a) = ADAPTIVE_SCHED {
+        if let Some(ref mut a) = *ADAPTIVE_SCHED.as_mut() {
             if let Some(ref mut t0) = a.base_scheduler.tasks[0] {
-                trap::CURRENT_TF = &mut t0.tf as *mut _;
+                *trap::CURRENT_TF.as_mut() = &mut t0.tf as *mut _;
             }
         }
         init_timer();
