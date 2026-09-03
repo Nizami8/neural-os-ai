@@ -1,11 +1,13 @@
 use core::arch::asm;
 use core::sync::atomic::Ordering;
+use crate::kcell::KernelCell;
 use crate::trapframe::TrapFrame;
 use crate::scheduler::{TaskState, MAX_TASKS};
 use crate::syscall;
 use crate::ipc;
 use crate::ADAPTIVE_SCHED;
 use crate::USE_AI;
+use crate::STORAGE;
 
 // QEMU `virt` CLINT (Core Local Interruptor) registers for hart 0.
 const CLINT_MTIME: *mut u64 = 0x0200_bff8 as *mut u64;
@@ -18,13 +20,18 @@ const TIMER_INTERVAL: u64 = 100_000; // ~10 ms quantum
 // it does not clutter the interactive shell (use the `stats` command on demand).
 const STATS_EVERY: usize = 2000;
 
+/// Persist learned weights every N statistics dumps.
+const PERSIST_EVERY_STATS: usize = 5;
+
 /// Pointer to the TrapFrame of the currently running task. Read and written by
 /// the assembly trap vector (trap.s) and updated here when the scheduler picks
-/// a new task.
+/// a new task. `KernelCell` is `#[repr(transparent)]` so the symbol layout
+/// matches a plain pointer for the assembly `la`/`ld` sequence.
 #[no_mangle]
-pub static mut CURRENT_TF: *mut TrapFrame = core::ptr::null_mut();
+pub static CURRENT_TF: KernelCell<*mut TrapFrame> = KernelCell::new(core::ptr::null_mut());
 
-static mut TICKS: usize = 0;
+static TICKS: KernelCell<usize> = KernelCell::new(0);
+static STAT_DUMPS: KernelCell<usize> = KernelCell::new(0);
 
 extern "C" {
     fn trap_vector();
@@ -66,22 +73,38 @@ pub extern "C" fn rust_trap_handler() {
     }
 }
 
+unsafe fn persist_weights_if_due() {
+    *STAT_DUMPS.as_mut() += 1;
+    if *STAT_DUMPS.as_ref() % PERSIST_EVERY_STATS != 0 {
+        return;
+    }
+    let Some(adaptive) = ADAPTIVE_SCHED.as_ref().as_ref() else {
+        return;
+    };
+    let Some(storage) = STORAGE.as_mut().as_mut() else {
+        return;
+    };
+    let (hidden, output) = adaptive.neural.export_weights();
+    storage.save_weights(&hidden, &output);
+}
+
 unsafe fn on_timer_tick() {
     if USE_AI.load(Ordering::Relaxed) == 1 {
-        if let Some(ref mut adaptive) = ADAPTIVE_SCHED {
+        if let Some(ref mut adaptive) = *ADAPTIVE_SCHED.as_mut() {
             // Neural / fairness / Q-learning picks the next task.
             adaptive.adaptive_schedule();
 
             // Point the trap vector at the newly selected task's frame.
             let cur = adaptive.base_scheduler.current;
             if let Some(ref mut task) = adaptive.base_scheduler.tasks[cur] {
-                CURRENT_TF = &mut task.tf as *mut TrapFrame;
+                *CURRENT_TF.as_mut() = &mut task.tf as *mut TrapFrame;
             }
 
-            TICKS += 1;
-            if TICKS % STATS_EVERY == 0 {
+            *TICKS.as_mut() += 1;
+            if *TICKS.as_ref() % STATS_EVERY == 0 {
                 adaptive.collect_statistics();
                 crate::print_stats(adaptive);
+                persist_weights_if_due();
             }
         }
     }
@@ -91,7 +114,7 @@ unsafe fn on_timer_tick() {
 /// TrapFrame (CURRENT_TF) for arguments/return value and advances mepc past the
 /// ecall so the task resumes at the following instruction.
 unsafe fn handle_syscall() {
-    let tf = CURRENT_TF; // raw pointer; avoid aliasing &mut with the scheduler
+    let tf = *CURRENT_TF.as_ref();
     if tf.is_null() {
         return;
     }
@@ -105,6 +128,7 @@ unsafe fn handle_syscall() {
     match num {
         syscall::SYS_GETPID => {
             let pid = ADAPTIVE_SCHED
+                .as_ref()
                 .as_ref()
                 .and_then(|a| {
                     let cur = a.base_scheduler.current;
@@ -126,18 +150,18 @@ unsafe fn handle_syscall() {
         syscall::SYS_SEND => ipc_send(arg0, arg1),
         syscall::SYS_RECV => ipc_recv(arg0),
         syscall::SYS_PS => {
-            if let Some(a) = ADAPTIVE_SCHED.as_ref() {
+            if let Some(a) = ADAPTIVE_SCHED.as_ref().as_ref() {
                 crate::print_ps(a);
             }
         }
         syscall::SYS_STATS => {
-            if let Some(a) = ADAPTIVE_SCHED.as_mut() {
+            if let Some(a) = ADAPTIVE_SCHED.as_mut().as_mut() {
                 a.collect_statistics();
                 crate::print_stats(a);
             }
         }
         syscall::SYS_NN => {
-            if let Some(a) = ADAPTIVE_SCHED.as_ref() {
+            if let Some(a) = ADAPTIVE_SCHED.as_ref().as_ref() {
                 crate::print_nn(a);
             }
         }
@@ -149,8 +173,8 @@ unsafe fn handle_syscall() {
 /// (round-robin). Used by yield (Ready), exit (Terminated) and blocking IPC
 /// (Blocked). Relies on at least one task always being runnable.
 unsafe fn reschedule(new_state: TaskState) {
-    let a = match ADAPTIVE_SCHED {
-        Some(ref mut a) => a,
+    let a = match ADAPTIVE_SCHED.as_mut().as_mut() {
+        Some(a) => a,
         None => return,
     };
     let cur = a.base_scheduler.current;
@@ -174,7 +198,8 @@ unsafe fn reschedule(new_state: TaskState) {
     if let Some(idx) = found {
         a.base_scheduler.tasks[idx].as_mut().unwrap().state = TaskState::Running;
         a.base_scheduler.current = idx;
-        CURRENT_TF = &mut a.base_scheduler.tasks[idx].as_mut().unwrap().tf as *mut TrapFrame;
+        *CURRENT_TF.as_mut() =
+            &mut a.base_scheduler.tasks[idx].as_mut().unwrap().tf as *mut TrapFrame;
     } else if new_state == TaskState::Ready {
         // Yield with nothing else to run: keep running the current task.
         if let Some(t) = a.base_scheduler.tasks[cur].as_mut() {
@@ -185,7 +210,7 @@ unsafe fn reschedule(new_state: TaskState) {
 
 /// Does the current task hold `right` on endpoint `epid`?
 unsafe fn current_has_cap(epid: usize, right: u8) -> bool {
-    ADAPTIVE_SCHED.as_ref().map_or(false, |a| {
+    ADAPTIVE_SCHED.as_ref().as_ref().map_or(false, |a| {
         let cur = a.base_scheduler.current;
         a.base_scheduler.tasks[cur]
             .as_ref()
@@ -196,12 +221,13 @@ unsafe fn current_has_cap(epid: usize, right: u8) -> bool {
 /// SYS_SEND: rendezvous send of a one-word message on `epid`.
 unsafe fn ipc_send(epid: usize, msg: usize) {
     if epid >= ipc::NUM_ENDPOINTS || !current_has_cap(epid, ipc::CAP_SEND) {
-        (*CURRENT_TF).regs[10] = ipc::EPERM; // deny: no SEND capability
+        (*(*CURRENT_TF.as_ref())).regs[10] = ipc::EPERM;
         return;
     }
-    if let Some(recv_idx) = ipc::ENDPOINTS[epid].receiver.take() {
+    let endpoints = ipc::ENDPOINTS.as_mut();
+    if let Some(recv_idx) = endpoints[epid].receiver.take() {
         // A receiver was waiting: deliver directly and wake it.
-        if let Some(a) = ADAPTIVE_SCHED.as_mut() {
+        if let Some(a) = ADAPTIVE_SCHED.as_mut().as_mut() {
             if let Some(rt) = a.base_scheduler.tasks[recv_idx].as_mut() {
                 rt.tf.regs[10] = msg; // recv() returns the message
                 rt.state = TaskState::Ready;
@@ -215,9 +241,10 @@ unsafe fn ipc_send(epid: usize, msg: usize) {
         // No receiver yet: park this sender until one arrives.
         let cur = ADAPTIVE_SCHED
             .as_ref()
+            .as_ref()
             .map(|a| a.base_scheduler.current)
             .unwrap_or(0);
-        ipc::ENDPOINTS[epid].sender = Some((cur, msg));
+        endpoints[epid].sender = Some((cur, msg));
         reschedule(TaskState::Blocked);
     }
 }
@@ -225,12 +252,13 @@ unsafe fn ipc_send(epid: usize, msg: usize) {
 /// SYS_RECV: rendezvous receive of a one-word message from `epid`.
 unsafe fn ipc_recv(epid: usize) {
     if epid >= ipc::NUM_ENDPOINTS || !current_has_cap(epid, ipc::CAP_RECV) {
-        (*CURRENT_TF).regs[10] = ipc::RECV_DENIED; // deny: no RECV capability
+        (*(*CURRENT_TF.as_ref())).regs[10] = ipc::RECV_DENIED;
         return;
     }
-    if let Some((send_idx, msg)) = ipc::ENDPOINTS[epid].sender.take() {
+    let endpoints = ipc::ENDPOINTS.as_mut();
+    if let Some((send_idx, msg)) = endpoints[epid].sender.take() {
         // A sender was waiting: take its message and wake it.
-        if let Some(a) = ADAPTIVE_SCHED.as_mut() {
+        if let Some(a) = ADAPTIVE_SCHED.as_mut().as_mut() {
             if let Some(stk) = a.base_scheduler.tasks[send_idx].as_mut() {
                 stk.tf.regs[10] = 0; // send() returns success
                 stk.state = TaskState::Ready;
@@ -244,9 +272,10 @@ unsafe fn ipc_recv(epid: usize) {
         // No sender yet: park this receiver until one arrives.
         let cur = ADAPTIVE_SCHED
             .as_ref()
+            .as_ref()
             .map(|a| a.base_scheduler.current)
             .unwrap_or(0);
-        ipc::ENDPOINTS[epid].receiver = Some(cur);
+        endpoints[epid].receiver = Some(cur);
         reschedule(TaskState::Blocked);
     }
 }

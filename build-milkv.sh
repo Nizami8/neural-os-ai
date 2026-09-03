@@ -21,11 +21,12 @@ echo ""
 echo "  → Compiling Neural OS (userspace binary for Linux)"
 echo ""
 
-cargo build \
+cargo +nightly build \
     --target riscv64gc-unknown-linux-gnu \
     --release \
     --bin milkv-userspace \
-    -Z build-std=core,alloc
+    --features milkv \
+    -Z build-std=std,panic_abort
 
 if [ ! -f "target/riscv64gc-unknown-linux-gnu/release/milkv-userspace" ]; then
     echo "❌ Build failed!"

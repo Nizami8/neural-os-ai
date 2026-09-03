@@ -37,4 +37,5 @@ impl Endpoint {
     }
 }
 
-pub static mut ENDPOINTS: [Endpoint; NUM_ENDPOINTS] = [Endpoint::new(); NUM_ENDPOINTS];
+pub static ENDPOINTS: crate::kcell::KernelCell<[Endpoint; NUM_ENDPOINTS]> =
+    crate::kcell::KernelCell::new([Endpoint::new(); NUM_ENDPOINTS]);

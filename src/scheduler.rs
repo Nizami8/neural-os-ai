@@ -15,15 +15,18 @@ pub const MAX_TASKS: usize = 7;
 /// the separate kernel stack inside the trap handler.
 pub const TASK_STACK_SIZE: usize = 16 * 1024;
 
+use crate::kcell::KernelCell;
+
 #[repr(C, align(16))]
 struct TaskStack([u8; TASK_STACK_SIZE]);
 
-static mut TASK_STACKS: [TaskStack; MAX_TASKS] =
-    [const { TaskStack([0; TASK_STACK_SIZE]) }; MAX_TASKS];
+static TASK_STACKS: KernelCell<[TaskStack; MAX_TASKS]> =
+    KernelCell::new([const { TaskStack([0; TASK_STACK_SIZE]) }; MAX_TASKS]);
 
 /// Top-of-stack address (16-byte aligned) for task slot `i`.
 fn stack_top(i: usize) -> usize {
-    let base = unsafe { core::ptr::addr_of!(TASK_STACKS[i]) as usize };
+    // SAFETY: stacks are only sized at boot / task create; address is stable.
+    let base = unsafe { core::ptr::addr_of!((*TASK_STACKS.as_ptr())[i]) as usize };
     (base + TASK_STACK_SIZE) & !0xF
 }
 
