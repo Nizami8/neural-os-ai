@@ -138,10 +138,11 @@ impl AdaptiveScheduler {
     }
 
     pub fn add_task(&mut self, id: usize, entry: fn(), task_class: TaskClass) {
-        self.base_scheduler.add_task(id, entry);
-        if id > 0 && id <= MAX_TASKS {
-            self.task_classes[id - 1] = task_class;
+        if id == 0 || id > MAX_TASKS {
+            return;
         }
+        self.base_scheduler.add_task(id, entry);
+        self.task_classes[id - 1] = task_class;
     }
 
     /// Grant a task (by id) an IPC capability on an endpoint.
@@ -212,6 +213,14 @@ impl AdaptiveScheduler {
 
     /// Предсказываем, когда надо переключиться
     pub fn predict_preemption(&self, current_idx: usize) -> bool {
+        if current_idx >= self.base_scheduler.tasks.len()
+            || current_idx >= self.task_classes.len()
+            || current_idx >= self.execution_start_time.len()
+            || current_idx >= self.task_deadlines.len()
+        {
+            return false;
+        }
+
         let waiting_count = self.base_scheduler.tasks.iter()
             .filter(|t| t.is_some() && t.unwrap().state == TaskState::Ready)
             .count();
@@ -244,10 +253,10 @@ impl AdaptiveScheduler {
 
     /// Q-learning с reward signal
     pub fn learn_with_reward(&mut self, signal: RewardSignal) {
-        let task_idx = signal.task_id.saturating_sub(1);
-        if task_idx >= MAX_TASKS {
+        if signal.task_id == 0 || signal.task_id > MAX_TASKS {
             return;
         }
+        let task_idx = signal.task_id - 1;
         
         // Обновляем Q-value для этой задачи
         let current_q = self.q_values[task_idx][0];

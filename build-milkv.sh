@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 echo "🔨 Building Neural OS for Milk-V Duo 256M"
 echo "========================================"
